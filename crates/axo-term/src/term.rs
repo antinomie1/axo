@@ -428,6 +428,31 @@ impl Term {
     }
 
     fn print_char(&mut self, c: char) {
+        // Fast path: printable ASCII in the default charset, the bulk of output.
+        if (' '..='~').contains(&c)
+            && self.charsets[self.shift] == Charset::Ascii
+            && !self.modes.insert
+        {
+            if self.cursor.wrap_next && self.modes.autowrap {
+                let y = self.cursor.y;
+                self.grid_mut().row_mut(y).wrapped = true;
+                self.cursor.x = 0;
+                self.linefeed();
+            }
+            let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols());
+            if self.grid().row(y).cells[x].flags.0 & (Flags::WIDE | Flags::SPACER) != 0 {
+                self.clear_cells(y, x, x + 1);
+            }
+            let mut cell = self.cursor.template;
+            cell.ch = c;
+            self.grid_mut().row_mut(y).cells[x] = cell;
+            if x + 1 >= cols {
+                self.cursor.wrap_next = true;
+            } else {
+                self.cursor.x = x + 1;
+            }
+            return;
+        }
         let c = match self.charsets[self.shift] {
             Charset::Graphics => graphics(c),
             Charset::Ascii => c,

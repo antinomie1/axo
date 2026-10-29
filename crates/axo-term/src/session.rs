@@ -79,7 +79,7 @@ impl Session {
             .name("axo-pty-read".into())
             .stack_size(256 * 1024)
             .spawn(move || {
-                let mut buf = vec![0u8; 64 * 1024];
+                let mut buf = vec![0u8; 128 * 1024];
                 loop {
                     let n = match reader.read(&mut buf) {
                         Ok(0) => break,
@@ -95,6 +95,7 @@ impl Session {
                     if let Some(reply) = reply {
                         let _ = responses.send(reply);
                     }
+                    // Coalesced: one wakeup stays pending until the UI paints.
                     if !flag.swap(true, Ordering::AcqRel) {
                         notify(Event::Wakeup);
                     }

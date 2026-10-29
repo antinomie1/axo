@@ -13,7 +13,8 @@
   - 窗口骨架（`crates/axo/ui/window.aegle`）与设置块（`crates/axo/ui/settings.aegle`）均采用 `.aegle` 标记语言编写。
   - 设置块支持字体族、字号、行高、深/浅色主题、窗口透明度（实时预乘 alpha 合成）、内边距、光标样式、回滚行数与默认 Shell，即时生效并可持久化到 `$XDG_CONFIG_HOME/axo/axo.conf`。
 - **极致轻量与零空闲开销**：
-  - PTY 读线程在后台完成 `vte` 解析并通过原子脏位合并 `UiProxy` 唤醒；无轮询、无常驻逐帧回调，空闲 CPU 占用为 **0%**，Release 二进制约 **3.0 MiB**。
+  - PTY 读线程在后台完成 `vte` 解析并通过原子脏位合并 `UiProxy` 唤醒；重绘绑定到 compositor 的帧回调（每个显示帧至多一次离屏渲染），无轮询、无常驻逐帧回调，空闲 CPU 占用为 **0%**，Release 二进制约 **3.0 MiB**。
+  - 屏幕与回滚历史共用单一环形缓冲，滚屏不搬移行；可打印 ASCII 走批量快路径。
 
 ## 目录结构
 

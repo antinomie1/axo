@@ -92,9 +92,15 @@ impl Row {
     }
 
     /// Blanks every cell, reusing the allocation.
+    #[inline]
     pub fn reset(&mut self, cols: usize, template: &Cell) {
-        self.cells.clear();
-        self.cells.resize(cols, Cell::blank(template));
+        let blank = Cell::blank(template);
+        if self.cells.len() == cols {
+            self.cells.fill(blank);
+        } else {
+            self.cells.clear();
+            self.cells.resize(cols, blank);
+        }
         self.wrapped = false;
     }
 

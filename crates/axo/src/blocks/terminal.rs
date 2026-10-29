@@ -55,6 +55,10 @@ struct State {
     /// Buttons reported to the application while mouse mode is on.
     reported: u8,
     title: String,
+    /// Output arrived that no paint has drawn yet.
+    pending: bool,
+    /// A one-shot frame callback is waiting for the next presented frame.
+    scheduled: bool,
 }
 
 fn mods(m: Modifiers) -> Mods {
@@ -198,11 +202,46 @@ impl Terminal {
     }
 
     /// Handles a reader wakeup; returns the new title when it changed.
+    ///
+    /// The paint is deferred to the next presented frame instead of running
+    /// once per PTY chunk, so a flood costs at most one render per frame.
     pub fn wake(&self) -> Option<String> {
-        self.canvas().invalidate();
-        let title = self.inner.session.term().take_title().map(str::to_owned)?;
-        self.inner.state.borrow_mut().title.clone_from(&title);
-        Some(title)
+        let title = {
+            let mut term = self.inner.session.term();
+            term.take_title().map(str::to_owned)
+        };
+        if let Some(title) = &title {
+            self.inner.state.borrow_mut().title.clone_from(title);
+        }
+        let schedule = {
+            let mut state = self.inner.state.borrow_mut();
+            state.pending = true;
+            !std::mem::replace(&mut state.scheduled, true)
+        };
+        if schedule {
+            self.schedule_frame();
+        }
+        title
+    }
+
+    /// Registers a one-shot frame callback, which runs once the compositor
+    /// presents the next frame and repaints only if output is still pending.
+    fn schedule_frame(&self) {
+        let inner = Rc::downgrade(&self.inner);
+        self.canvas().on_frame(move |_, _| {
+            let Some(inner) = inner.upgrade() else {
+                return false;
+            };
+            let pending = {
+                let mut state = inner.state.borrow_mut();
+                state.scheduled = false;
+                std::mem::take(&mut state.pending)
+            };
+            if pending {
+                inner.canvas().invalidate();
+            }
+            false
+        });
     }
 
     pub fn cwd(&self) -> Option<PathBuf> {

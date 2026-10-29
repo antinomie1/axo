@@ -127,3 +127,58 @@ fn encodes_keys_and_mouse() {
     );
     assert_eq!(out, b"\x1b[<0;5;3m");
 }
+
+#[test]
+fn scroll_regions_and_line_edits_keep_history_intact() {
+    let mut term = Term::new(6, 4, 10);
+    term.advance(b"a\r\nb\r\nc\r\nd");
+    // Region 2..=3: scrolling inside it must not touch history or row 0.
+    term.advance(b"\x1b[2;3r\x1b[3;1H\nX");
+    assert_eq!(term.grid().history_len(), 0);
+    assert_eq!(line(&term, 0), "a");
+    assert_eq!(line(&term, 1), "c");
+    assert_eq!(line(&term, 2), "X");
+    assert_eq!(line(&term, 3), "d");
+    // Reverse index at the region top scrolls the region down.
+    term.advance(b"\x1b[2;1H\x1bM");
+    assert_eq!(line(&term, 1), "");
+    assert_eq!(line(&term, 2), "c");
+    // Insert and delete lines at row 1 within the region.
+    term.advance(b"\x1b[r\x1b[2;1HY\x1b[L");
+    assert_eq!(line(&term, 1), "");
+    assert_eq!(line(&term, 2), "Y");
+    term.advance(b"\x1b[M");
+    assert_eq!(line(&term, 1), "Y");
+    // A full-screen scroll still feeds history.
+    term.advance(b"\x1b[4;1H\n\n");
+    assert_eq!(term.grid().history_len(), 2);
+    assert_eq!(line(&term, -2), "a");
+}
+
+#[test]
+fn ascii_fast_path_matches_general_path() {
+    // Wrapping at the last column defers the wrap until the next printable.
+    let mut term = Term::new(4, 2, 10);
+    term.advance(b"abcdef");
+    assert_eq!(line(&term, 0), "abcd");
+    assert_eq!(line(&term, 1), "ef");
+    // Overwriting half of a wide character with ASCII clears its partner.
+    let mut term = Term::new(6, 2, 10);
+    term.advance("中x".as_bytes());
+    assert!(term.grid().row(0).cells[0].flags.has(Flags::WIDE));
+    term.advance(b"\x1b[1;2HY");
+    assert_eq!(line(&term, 0), " Yx");
+    assert!(!term.grid().row(0).cells[0].flags.has(Flags::WIDE));
+    assert!(!term.grid().row(0).cells[1].flags.has(Flags::SPACER));
+    // Insert mode still shifts the line for ASCII.
+    let mut term = Term::new(6, 1, 0);
+    term.advance(b"\x1b[4habc\r\x1b[1;2HZ");
+    assert_eq!(line(&term, 0), "aZbc");
+    // The active SGR still applies to ASCII written through the fast path.
+    let mut term = Term::new(6, 1, 0);
+    term.advance(b"\x1b[1;38;5;196mA\x1b[0mB");
+    let row = term.grid().row(0);
+    assert!(row.cells[0].flags.has(Flags::BOLD));
+    assert_eq!(row.cells[0].fg, Color::Indexed(196));
+    assert_eq!(row.cells[1].fg, Color::Default);
+}

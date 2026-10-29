@@ -1,4 +1,4 @@
-//! Screen lines plus a bounded scrollback ring.
+//! Screen lines and bounded scrollback in one unified ring buffer.
 
 use std::collections::VecDeque;
 
@@ -6,57 +6,62 @@ use crate::cell::{Cell, Flags, Row};
 
 /// The visible lines of one screen and, for the primary screen, its history.
 ///
-/// History rows keep the width they had when they scrolled off; readers treat
-/// cells past a row's end as blank, so a resize never rewrites the history.
+/// Both live in one [`VecDeque`]: `0..history_len` is history (oldest first)
+/// and `history_len..ring.len()` is the active screen (`0..rows`). A full-screen
+/// scroll into history only pushes or recycles one [`Row`] without moving the
+/// other screen lines.
 pub struct Grid {
     cols: usize,
-    lines: Vec<Row>,
-    history: VecDeque<Row>,
+    rows: usize,
+    ring: VecDeque<Row>,
     max_history: usize,
 }
 
 impl Grid {
     pub fn new(cols: usize, rows: usize, max_history: usize) -> Self {
         let blank = Cell::default();
+        let mut ring = VecDeque::with_capacity(rows + max_history.min(1024));
+        for _ in 0..rows {
+            ring.push_back(Row::new(cols, &blank));
+        }
         Self {
             cols,
-            lines: (0..rows).map(|_| Row::new(cols, &blank)).collect(),
-            history: VecDeque::new(),
+            rows,
+            ring,
             max_history,
         }
     }
 
+    #[inline]
     pub fn cols(&self) -> usize {
         self.cols
     }
+    #[inline]
     pub fn rows(&self) -> usize {
-        self.lines.len()
+        self.rows
     }
+    #[inline]
     pub fn history_len(&self) -> usize {
-        self.history.len()
+        self.ring.len() - self.rows
     }
 
     #[inline]
     pub fn row(&self, y: usize) -> &Row {
-        &self.lines[y]
+        let base = self.ring.len() - self.rows;
+        &self.ring[base + y]
     }
     #[inline]
     pub fn row_mut(&mut self, y: usize) -> &mut Row {
-        &mut self.lines[y]
+        let base = self.ring.len() - self.rows;
+        &mut self.ring[base + y]
     }
 
     /// A line by signed index: `0..rows` is the screen, negative indexes count
     /// back into history (`-1` is the newest history line).
+    #[inline]
     pub fn line(&self, y: isize) -> Option<&Row> {
-        if y >= 0 {
-            self.lines.get(y as usize)
-        } else {
-            let back = (-y) as usize;
-            self.history
-                .len()
-                .checked_sub(back)
-                .map(|index| &self.history[index])
-        }
+        let idx = self.history_len() as isize + y;
+        (idx >= 0).then(|| self.ring.get(idx as usize)).flatten()
     }
 
     /// Scrolls `top..=bottom` up by `n`, blanking the freed bottom lines.
@@ -73,45 +78,56 @@ impl Grid {
         if n == 0 {
             return 0;
         }
-        self.lines[top..=bottom].rotate_left(n);
         let keep = keep && self.max_history > 0;
-        for y in bottom + 1 - n..=bottom {
-            if keep {
-                let fresh = match self.history.len() >= self.max_history {
-                    true => {
-                        let mut row = self.history.pop_front().expect("history is full");
-                        row.reset(self.cols, template);
-                        row
-                    }
-                    false => Row::new(self.cols, template),
+        if keep && top == 0 {
+            for _ in 0..n {
+                let fresh = if self.history_len() >= self.max_history {
+                    let mut row = self.ring.pop_front().expect("history is full");
+                    row.reset(self.cols, template);
+                    row
+                } else {
+                    Row::new(self.cols, template)
                 };
-                let old = std::mem::replace(&mut self.lines[y], fresh);
-                self.history.push_back(old);
-            } else {
-                self.lines[y].reset(self.cols, template);
+                if bottom + 1 == self.rows {
+                    self.ring.push_back(fresh);
+                } else {
+                    let at = (self.ring.len() - self.rows) + bottom + 1;
+                    self.ring.insert(at, fresh);
+                }
             }
+            return n;
         }
-        if keep { n } else { 0 }
+        let base = self.ring.len() - self.rows;
+        for _ in 0..n {
+            let mut row = self.ring.remove(base + top).expect("valid top");
+            row.reset(self.cols, template);
+            self.ring.insert(base + bottom, row);
+        }
+        0
     }
 
     /// Scrolls `top..=bottom` down by `n`, blanking the freed top lines.
     pub fn scroll_down(&mut self, top: usize, bottom: usize, n: usize, template: &Cell) {
         let n = n.min(bottom + 1 - top);
-        self.lines[top..=bottom].rotate_right(n);
-        for row in &mut self.lines[top..top + n] {
+        let base = self.ring.len() - self.rows;
+        for _ in 0..n {
+            let mut row = self.ring.remove(base + bottom).expect("valid bottom");
             row.reset(self.cols, template);
+            self.ring.insert(base + top, row);
         }
     }
 
     pub fn clear_history(&mut self) {
-        self.history.clear();
-        self.history.shrink_to_fit();
+        let hist = self.history_len();
+        self.ring.drain(..hist);
+        self.ring.shrink_to_fit();
     }
 
     pub fn set_max_history(&mut self, max: usize) {
         self.max_history = max;
-        while self.history.len() > max {
-            self.history.pop_front();
+        let extra = self.history_len().saturating_sub(max);
+        if extra > 0 {
+            self.ring.drain(..extra);
         }
     }
 
@@ -122,7 +138,9 @@ impl Grid {
         let blank = Cell::default();
         let mut cursor = cursor;
         if cols != self.cols {
-            for row in &mut self.lines {
+            let base = self.history_len();
+            for i in base..self.ring.len() {
+                let row = &mut self.ring[i];
                 if cols < row.cells.len() && row.cells[cols - 1].flags.has(Flags::WIDE) {
                     row.cells[cols - 1] = Cell::blank(&row.cells[cols - 1]);
                 }
@@ -130,32 +148,30 @@ impl Grid {
             }
             self.cols = cols;
         }
-        while self.lines.len() > rows && self.lines.len() - 1 > cursor {
-            if !self.lines.last().unwrap().cells.iter().all(|c| *c == blank) {
+        while self.rows > rows && self.rows - 1 > cursor {
+            if !self.ring.back().unwrap().cells.iter().all(|c| *c == blank) {
                 break;
             }
-            self.lines.pop();
+            self.ring.pop_back();
+            self.rows -= 1;
         }
-        if self.lines.len() > rows {
-            let extra = self.lines.len() - rows;
-            for row in self.lines.drain(..extra) {
-                if self.max_history > 0 {
-                    if self.history.len() >= self.max_history {
-                        self.history.pop_front();
-                    }
-                    self.history.push_back(row);
-                }
+        if self.rows > rows {
+            let extra = self.rows - rows;
+            self.rows = rows;
+            let drop_hist = self.history_len().saturating_sub(self.max_history);
+            if drop_hist > 0 {
+                self.ring.drain(..drop_hist);
             }
             cursor = cursor.saturating_sub(extra);
         }
-        while self.lines.len() < rows {
-            match self.history.pop_back() {
-                Some(mut row) => {
-                    row.cells.resize(cols, blank);
-                    self.lines.insert(0, row);
-                    cursor += 1;
-                }
-                None => self.lines.push(Row::new(cols, &blank)),
+        while self.rows < rows {
+            if self.history_len() > 0 {
+                self.rows += 1;
+                self.row_mut(0).cells.resize(cols, blank);
+                cursor += 1;
+            } else {
+                self.ring.push_back(Row::new(cols, &blank));
+                self.rows += 1;
             }
         }
         cursor.min(rows - 1)

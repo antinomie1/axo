@@ -63,10 +63,17 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] 设置块（aegle 标记 `ui/settings.aegle`）：字体族、字号、行高、主题、窗口透明度、内边距、光标样式、回滚行数、shell；即时应用并保存
 - [x] 快捷键（见 README.md）
 
+### M3.5 性能优化
+- [x] 屏幕 + 回滚合并为单一环形缓冲（`grid.rs`），整屏滚入历史仅 push/recycle 一行，无切片旋转
+- [x] 可打印 ASCII 批量快路径（`term.rs`），跳过宽字符分支与 `unicode_width` 查表
+- [x] 重绘按 compositor 帧回调节流（一次性 `on_frame`），洪峰输出每个显示帧至多渲染一次
+- [x] 读线程缓冲提升到 128 KiB，脏位只在真正绘制后清除
+
 ### M4 验证
 - [x] `cargo build --release`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`
 - [x] 实机运行（含 Khronos Vulkan Validation Layer）：shell、vim（备用屏）、CJK/真彩色/框线、多分屏、多标签页、设置页与窗口透明
 - [x] 空闲 CPU 为 0（10s 空闲 0 CPU tick，无逐帧回调）
+- [x] 与 Alacritty 0.17 同条件对比（DSR 同步吞吐）：ASCII 157.8 vs 140.8 MiB/s、SGR 168.8 vs 193.4、CJK 160.5 vs 163.5、备用屏 TUI 163.4 vs 162.2 MiB/s；启动 64 vs 114 ms
 
 ## 后续（未做）
 - [ ] 终端内输入法（IME）预编辑：需要 aegle Canvas 接入 IME 事务
