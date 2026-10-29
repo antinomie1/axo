@@ -1,6 +1,9 @@
 // Terminal quads: solid rectangles and atlas glyphs, one instance each.
 // Positions arrive in NDC; atlas coordinates in texels. The target is sRGB,
 // so blending happens in linear light on premultiplied colors.
+//
+// Coverage glyphs sample a single-channel page; color glyphs (emoji) sample an
+// RGBA page. Keeping them apart makes the common case an R8 atlas.
 
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -35,19 +38,22 @@ fn vs_main(
     return out;
 }
 
-@group(0) @binding(0) var atlas: texture_2d<f32>;
+@group(0) @binding(0) var masks: texture_2d<f32>;
+@group(0) @binding(1) var colors: texture_2d<f32>;
 
 @fragment
 fn fs_main(in: Out) -> @location(0) vec4<f32> {
     if in.kind == 0u {
         return vec4<f32>(in.color.rgb * in.color.a, in.color.a);
     }
-    let texel = textureLoad(atlas, vec2<i32>(floor(in.uv)), 0);
+    let at = vec2<i32>(floor(in.uv));
     if in.kind == 1u {
-        let c = texel.a + texel.a * (1.0 - texel.a) * in.contrast;
+        let coverage = textureLoad(masks, at, 0).r;
+        let c = coverage + coverage * (1.0 - coverage) * in.contrast;
         let a = in.color.a * c;
         return vec4<f32>(in.color.rgb * a, a);
     }
     // Color glyphs store straight sRGB.
+    let texel = textureLoad(colors, at, 0);
     return vec4<f32>(linear(texel.rgb) * texel.a, texel.a) * in.color.a;
 }

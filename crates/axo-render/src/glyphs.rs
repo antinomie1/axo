@@ -4,6 +4,8 @@
 //! Each distinct character and style is shaped and rasterized once; renderers
 //! keep the result in their own atlas, so this runs only on cache misses.
 
+use std::{cell::RefCell, rc::Rc};
+
 use aegle::ui::scene::{Color, SceneBuilder};
 use aegle_glyph::{CacheLimits, Content, GlyphCache, RasterOptions};
 use aegle_text::{LineHeight, Slant, TextStyle, TextSystem};
@@ -28,13 +30,26 @@ pub struct Bitmap {
     pub top: i32,
     /// Color glyphs carry straight sRGB; masks carry coverage in alpha.
     pub color: bool,
-    /// Tightly packed RGBA8.
-    pub rgba: Vec<u8>,
+    /// Tightly packed rows: one coverage byte per pixel for a mask, four for
+    /// straight sRGB RGBA when [`Self::color`]. Mask pages upload as
+    /// `R8_UNORM`, so a mask costs a quarter of the bytes an RGBA bitmap did.
+    pub data: Vec<u8>,
+}
+
+impl Bitmap {
+    /// Bytes per pixel of [`Self::data`].
+    pub fn stride(&self) -> usize {
+        if self.color { 4 } else { 1 }
+    }
 }
 
 pub struct Glyphs {
     text: TextSystem,
-    cache: GlyphCache,
+    /// The raster cache. A GPU renderer replaces it with the device's own, so
+    /// the host's UI text and the terminal share one set of glyph pixels.
+    cache: Rc<RefCell<GlyphCache>>,
+    /// Whether the cache belongs to someone else and must not be cleared.
+    shared: bool,
     family: String,
     /// Font size in device pixels.
     size: f32,
@@ -47,10 +62,11 @@ impl Glyphs {
     pub fn new() -> Self {
         Self {
             text: TextSystem::system(),
-            cache: GlyphCache::with_limits(CacheLimits {
+            cache: Rc::new(RefCell::new(GlyphCache::with_limits(CacheLimits {
                 image_bytes: 1 << 20,
                 ..CacheLimits::default()
-            }),
+            }))),
+            shared: false,
             family: "monospace".into(),
             size: 14.0,
             cell: CellSize::default(),
@@ -59,6 +75,13 @@ impl Glyphs {
 
     pub fn cell(&self) -> CellSize {
         self.cell
+    }
+
+    /// Uses a cache owned by the host (the renderer's shared one) instead of
+    /// this value's private cache, so glyphs rasterize once for both.
+    pub fn share(&mut self, cache: Rc<RefCell<GlyphCache>>) {
+        self.cache = cache;
+        self.shared = true;
     }
 }
 
@@ -87,7 +110,11 @@ impl Glyphs {
         }
         self.family = format!("{}, monospace", font.family.trim().trim_end_matches(','));
         self.size = font.size * scale;
-        self.cache.clear();
+        // A shared cache is bounded and keyed by size, and clearing it would
+        // drop the host's glyphs too.
+        if !self.shared {
+            self.cache.borrow_mut().clear();
+        }
         let regular = GlyphKey {
             ch: 'M',
             bold: false,
@@ -132,6 +159,7 @@ impl Glyphs {
 
         // Placed glyph images in paragraph pixels: (x, y, width, height, content, data).
         let mut placed = Vec::new();
+        let mut cache = self.cache.borrow_mut();
         for run in scene.glyph_runs() {
             for glyph in run.glyphs() {
                 let options = RasterOptions {
@@ -142,7 +170,7 @@ impl Glyphs {
                     skew: run.skew(),
                     ..RasterOptions::default()
                 };
-                let Ok(image) = self.cache.rasterize(run.font(), glyph.id, options) else {
+                let Ok(image) = cache.rasterize(run.font(), glyph.id, options) else {
                     continue;
                 };
                 let p = image.placement;
@@ -154,6 +182,7 @@ impl Glyphs {
                 placed.push((x, y, p.width, p.height, image.content, image.data.to_vec()));
             }
         }
+        drop(cache);
         if placed.is_empty() {
             return None;
         }
@@ -162,26 +191,33 @@ impl Glyphs {
         let x1 = placed.iter().map(|g| g.0 + g.2 as i32).max().unwrap();
         let y1 = placed.iter().map(|g| g.1 + g.3 as i32).max().unwrap();
         let (width, height) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        // One color glyph makes the whole cell a color bitmap: an atlas entry
+        // holds one pixel format, so a mixed cell widens to RGBA.
         let color = placed.iter().any(|g| g.4 == Content::Color);
-        let mut rgba = vec![0u8; (width * height * 4) as usize];
-        for (x, y, w, h, content, data) in placed {
+        let stride = if color { 4 } else { 1 };
+        let mut data = vec![0u8; width as usize * height as usize * stride];
+        for (x, y, w, h, content, src) in placed {
             for row in 0..h as usize {
                 for col in 0..w as usize {
-                    let dst =
-                        (((y - y0) as usize + row) * width as usize + (x - x0) as usize + col) * 4;
-                    let src = row * w as usize + col;
+                    let dst = (((y - y0) as usize + row) * width as usize + (x - x0) as usize + col)
+                        * stride;
+                    let index = row * w as usize + col;
                     let pixel = match content {
-                        Content::Mask => [255, 255, 255, data[src]],
+                        Content::Mask => [255, 255, 255, src[index]],
                         Content::Color => [
-                            data[src * 4],
-                            data[src * 4 + 1],
-                            data[src * 4 + 2],
-                            data[src * 4 + 3],
+                            src[index * 4],
+                            src[index * 4 + 1],
+                            src[index * 4 + 2],
+                            src[index * 4 + 3],
                         ],
                     };
                     // Overlapping glyphs (marks over a base) keep the strongest coverage.
-                    if pixel[3] >= rgba[dst + 3] {
-                        rgba[dst..dst + 4].copy_from_slice(&pixel);
+                    if pixel[3] >= data[dst + stride - 1] {
+                        if color {
+                            data[dst..dst + 4].copy_from_slice(&pixel);
+                        } else {
+                            data[dst] = pixel[3];
+                        }
                     }
                 }
             }
@@ -192,7 +228,7 @@ impl Glyphs {
             left: x0,
             top: baseline.round() as i32 - y0,
             color,
-            rgba,
+            data,
         })
     }
 }

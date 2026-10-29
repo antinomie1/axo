@@ -129,11 +129,19 @@ impl VulkanRenderer {
                 None,
             )?;
 
-            let bindings = [vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+            // Binding 0 is the coverage page (R8), binding 1 the color page.
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            ];
             let set_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
@@ -147,7 +155,7 @@ impl VulkanRenderer {
 
             let sizes = [vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLED_IMAGE,
-                descriptor_count: 1,
+                descriptor_count: 2,
             }];
             let descriptors = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -161,6 +169,10 @@ impl VulkanRenderer {
                     .set_layouts(&set_layouts),
             )?[0];
             let atlas = Atlas::new(&gpu, pool, 1024)?;
+            // Shape and rasterize through the device's cache: aegle's own UI
+            // text keeps its glyph pixels there too.
+            let mut glyphs = Glyphs::new();
+            glyphs.share(shared.glyph_cache());
             let renderer = Self {
                 shared,
                 pool,
@@ -171,7 +183,7 @@ impl VulkanRenderer {
                 descriptors,
                 set,
                 atlas,
-                glyphs: Glyphs::new(),
+                glyphs,
                 cell: CellSize::default(),
                 surfaces: Vec::new(),
                 quads: Quads::default(),
@@ -279,16 +291,26 @@ impl VulkanRenderer {
     }
 
     fn bind_atlas(&self) {
-        let image = [vk::DescriptorImageInfo::default()
-            .image_view(self.atlas.image.view)
+        let mask = [vk::DescriptorImageInfo::default()
+            .image_view(self.atlas.mask_view())
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-            .image_info(&image);
+        let color = [vk::DescriptorImageInfo::default()
+            .image_view(self.atlas.color_view())
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&mask),
+            vk::WriteDescriptorSet::default()
+                .dst_set(self.set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&color),
+        ];
         // SAFETY: the set is not in use: callers waited for the device or never submitted.
-        unsafe { self.gpu.device.update_descriptor_sets(&[write], &[]) };
+        unsafe { self.gpu.device.update_descriptor_sets(&writes, &[]) };
     }
 
     fn wait_idle(&self) {

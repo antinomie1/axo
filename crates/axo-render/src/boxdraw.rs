@@ -48,11 +48,7 @@ impl Mask {
             left: 0,
             top: cell.baseline,
             color: false,
-            rgba: self
-                .alpha
-                .iter()
-                .flat_map(|&a| [255, 255, 255, a])
-                .collect(),
+            data: self.alpha,
         }
     }
 }
