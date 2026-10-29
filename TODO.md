@@ -34,6 +34,7 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] `Window::scale()`：HiDPI 下终端纹理按物理像素渲染，避免模糊。
 - [x] `Node::request_paste()` + `CanvasEvent::Paste(String)`：Canvas（终端）可读取剪贴板。
 - [x] Pango 字体文件缓存按文件路径共享 `Blob`（避免 `.ttc` 字体集按 face 重复读入内存）。
+- [x] 单行编辑框不再把自身文本当作可纵向滚动内容：`scroll_limit` 对单行返回 0，caret 显露不再挪动 `scroll.y`，滚轮经过内嵌输入框时滚动外层视图（多行编辑区仍滚自己的文字）；单行文字在控件内垂直居中，基线、指针映射与 IME 原点随之调整。
 
 ## 里程碑
 
@@ -54,14 +55,15 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] `Renderer` trait（surface 创建/销毁/字体度量/绘制/场景合成）
 - [x] 字形：aegle `TextSystem` 成形单字（含系统回退、CJK）、`GlyphCache` 栅格化、框线/块元素像素级自绘、单元格度量
 - [x] Vulkan：共享图集（RGBA8，灰度/彩色字形）、实例化绘制（背景 run 合并 + 字形 + 光标/下划线/删除线/选择）、正确的子通道依赖与布局屏障
+- [x] 配色方案（`palette`）：前景/背景、光标与光标文字色、选区与选区文字色、16 色 ANSI + 标准 256 色表；内置 kitty（默认）等 12 套方案，解析 kitty 主题文件，按背景亮度派生深/浅窗口主题
 - [x] 默认背景透明（由窗口主题背景提供，支持实时调节窗口透明度）
 
 ### M3 应用 `axo`
 - [x] 配置：`~/.config/axo/axo.conf`（`key = value`，无 serde）
 - [x] 标签页（顶部，`ui/window.aegle`）：新建、关闭、切换；标题跟随焦点块（OSC 标题优先，否则前台命令 + 当前目录）
 - [x] 块与分屏：每个标签页一棵块树；水平/垂直分屏、关闭块、焦点在块间按方向移动
-- [x] 设置块（aegle 标记 `ui/settings.aegle`）：字体族、字号、行高、主题、窗口透明度、内边距、光标样式、回滚行数、标签栏开关、shell；即时应用并保存
-- [x] 快捷键（见 README.md）
+- [x] 设置块（aegle 标记 `ui/settings.aegle`）：字体族、字号、行高、配色方案（内置方案与 `themes/*.conf` 列表）、窗口透明度、内边距、光标样式、回滚行数、标签栏开关、shell；即时应用并保存
+- [x] 快捷键（见 README.md），含终端内 `Ctrl+滚轮` 缩放字号：每格滚轮 1pt、单事件最多 1 步、触控板按 10 逻辑像素累计，复用 `FontSize` 动作同步所有终端
 
 ### M3.5 性能优化
 - [x] 屏幕 + 回滚合并为单一环形缓冲（`grid.rs`），整屏滚入历史仅 push/recycle 一行，无切片旋转
@@ -81,3 +83,4 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [ ] 连字（ligatures）、Kitty 键盘协议、图像协议（sixel/kitty）
 - [ ] 其他渲染器实现（wgpu / CPU）——`axo_render::Renderer` 接口已就绪
 - [ ] 搜索、URL 识别
+- [ ] 配色方案的实时预览（设置页显示当前方案色板）与 `theme` 下拉的搜索

@@ -12,9 +12,9 @@ license = "BSD-2-Clause"
 axo-term = { path = "crates/axo-term" }
 axo-render = { path = "crates/axo-render" }
 # Exactly one aegle renderer per build: Vulkan, which also hosts the terminal's ash pipeline.
-aegle = { git = "https://github.com/antinomie1/aegle", default-features = false, features = ["desktop", "vulkan"] }
-aegle-glyph = { git = "https://github.com/antinomie1/aegle", features = ["scene"] }
-aegle-text = { git = "https://github.com/antinomie1/aegle", features = ["scene"] }
+aegle = { git = "https://github.com/antinomie1/aegle", rev = "bc051d13f93ff92fd567e946f59d631dd466205a", default-features = false, features = ["desktop", "vulkan"] }
+aegle-glyph = { git = "https://github.com/antinomie1/aegle", rev = "bc051d13f93ff92fd567e946f59d631dd466205a", features = ["scene"] }
+aegle-text = { git = "https://github.com/antinomie1/aegle", rev = "bc051d13f93ff92fd567e946f59d631dd466205a", features = ["scene"] }
 
 [profile.release]
 opt-level = 3

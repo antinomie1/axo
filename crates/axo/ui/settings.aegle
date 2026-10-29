@@ -1,54 +1,60 @@
 // The settings block. Values are filled from the configuration in Rust;
 // every change applies immediately, Save writes it to axo.conf.
+// Labels wrap, so a narrow pane or a long hint stays readable.
 ScrollView {
     padding: 20dp
     gap: 10dp
-    Text { text: "Settings"; font_size: 20dp }
+    Text { text: "Settings"; font_size: 20dp; wrap: true }
 
-    Text { text: "Font family" }
+    Text { text: "Font family"; wrap: true }
     TextField { id: font_family; text: "monospace"; tooltip: "CSS-style family list, monospace is appended" }
     Row {
         gap: 12dp
         Column {
             grow: 1
             gap: 4dp
-            Text { text: "Font size" }
+            Text { text: "Font size"; wrap: true }
             NumberField { id: font_size; min: 4; max: 96; value: 14; step: 0.5; decimals: 1 }
         }
         Column {
             grow: 1
             gap: 4dp
-            Text { text: "Line height" }
+            Text { text: "Line height"; wrap: true }
             NumberField { id: line_height; min: 0.5; max: 3; value: 1; step: 0.05; decimals: 2 }
         }
     }
 
     Separator {}
-    Text { text: "Theme" }
-    Dropdown { id: theme; items: ["Dark", "Light"] }
-    Switch { id: tab_bar; text: "Show tab bar"; checked: true }
-    Text { id: opacity_label; text: "Window opacity" }
+    Text { text: "Color scheme"; wrap: true }
+    Dropdown { id: theme; items: ["kitty"] }
+    Text {
+        text: "Bundled schemes, or a kitty theme in ~/.config/axo/themes/<name>.conf; color0..color15, foreground, background, cursor and selection_background in axo.conf override it."
+        font_size: 12dp
+        wrap: true
+    }
+    Switch { id: tab_bar; text: "Show tab bar"; checked: true; wrap: true }
+    Text { id: opacity_label; text: "Window opacity"; wrap: true }
     Slider { id: opacity; min: 0.3; max: 1; value: 1; step: 0.05 }
     Row {
         gap: 12dp
         Column {
             grow: 1
             gap: 4dp
-            Text { text: "Padding" }
+            Text { text: "Padding"; wrap: true }
             NumberField { id: padding; min: 0; max: 64; value: 6; step: 1; decimals: 0 }
         }
         Column {
             grow: 1
             gap: 4dp
-            Text { text: "Cursor" }
+            Text { text: "Cursor"; wrap: true }
             Dropdown { id: cursor; items: ["Block", "Bar", "Underline"] }
         }
     }
 
     Separator {}
-    Text { text: "Scrollback lines" }
+    Text { text: "Scrollback lines"; wrap: true }
     NumberField { id: scrollback; min: 0; max: 1000000; value: 10000; step: 1000; decimals: 0 }
-    Text { text: "Shell (empty: $SHELL; applies to new terminals)" }
+    Text { text: "Shell (empty: $SHELL; applies to new terminals)"; wrap: true }
     TextField { id: shell; text: "" }
 
     Row {
@@ -57,5 +63,5 @@ ScrollView {
         Button { id: save; text: "Save" }
         Button { id: defaults; text: "Defaults" }
     }
-    Text { id: status; text: "" }
+    Text { id: status; text: ""; wrap: true }
 }

@@ -16,7 +16,7 @@ use aegle::{
 use crate::{
     blocks::{Block, BlockRef, Settings, Terminal},
     chrome,
-    config::Config,
+    config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE},
     keys::{self, Action, Dir},
     layout::Pane,
     menu::MenuCommand,
@@ -627,7 +627,7 @@ impl Workspace {
                 let mut config = self.shared.config.borrow().clone();
                 config.font_size = match step {
                     0 => Config::default().font_size,
-                    step => (config.font_size + step as f32).clamp(4.0, 96.0),
+                    step => (config.font_size + step as f32).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE),
                 };
                 self.apply_config(config);
             }

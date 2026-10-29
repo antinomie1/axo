@@ -26,7 +26,8 @@ use axo_term::{
 
 use super::{Block, next_id};
 use crate::{
-    config::Config,
+    config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE},
+    keys::Action,
     menu::BlockMenu,
     shared::{Msg, SharedRef},
 };
@@ -55,6 +56,8 @@ struct State {
     drag: (usize, usize),
     /// Fractional wheel lines carried between events.
     wheel: f32,
+    /// Fractional Ctrl+wheel zoom travel carried between events.
+    zoom: f32,
     /// Buttons reported to the application while mouse mode is on.
     reported: u8,
     title: String,
@@ -65,6 +68,25 @@ struct State {
     /// The right press of this batch already went to the application or
     /// opened the menu; the queued context menu request must not repeat it.
     suppress_menu: bool,
+}
+
+/// Vertical wheel travel, in logical pixels, that makes one font-size step.
+const ZOOM_WHEEL_STEP: f32 = 10.0;
+
+/// Accumulates Ctrl+wheel travel in `carry` and returns a font-size step:
+/// at most one per event, so discrete notches stay one step and continuous
+/// scrolling still steps once enough travel gathered.
+fn zoom_step(carry: &mut f32, delta: f32) -> i8 {
+    if delta == 0.0 {
+        return 0;
+    }
+    *carry += delta / ZOOM_WHEEL_STEP;
+    if carry.abs() < 1.0 {
+        return 0;
+    }
+    *carry = 0.0;
+    // Positive deltas scroll down, so wheel up (negative) zooms in.
+    if delta > 0.0 { -1 } else { 1 }
 }
 
 fn mods(m: Modifiers) -> Mods {
@@ -555,6 +577,12 @@ impl Inner {
                 modifiers,
                 ..
             } => {
+                // Ctrl+wheel zooms the font instead of scrolling the view, for
+                // every terminal, like the Ctrl+= / Ctrl+- shortcuts.
+                if modifiers.control && !modifiers.alt {
+                    self.zoom(delta.y);
+                    return;
+                }
                 let line = self.shared.renderer.borrow().cell_size().height as f32
                     / self.shared.scale.get();
                 let lines = {
@@ -620,6 +648,25 @@ impl Inner {
         }
     }
 
+    /// Ctrl+wheel zoom, applied to every terminal through the same action as
+    /// the `Ctrl+=` / `Ctrl+-` shortcuts.
+    fn zoom(&self, delta: f32) {
+        let step = {
+            let mut state = self.state.borrow_mut();
+            zoom_step(&mut state.zoom, delta)
+        };
+        if step == 0 {
+            return;
+        }
+        let current = self.shared.config.borrow().font_size;
+        if (current + f32::from(step)).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE) == current {
+            return;
+        }
+        if let Some(proxy) = self.shared.proxy.get() {
+            let _ = proxy.send(Msg::Action(Action::FontSize(step)));
+        }
+    }
+
     fn paste(&self, text: &str) {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bracketed = self.session.term().modes.bracketed_paste;
@@ -677,4 +724,35 @@ fn display_path(path: &Path) -> String {
         };
     }
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::zoom_step;
+
+    #[test]
+    fn wheel_zoom_steps_once_per_notch() {
+        let mut carry = 0.0;
+        assert_eq!(zoom_step(&mut carry, 0.0), 0);
+        assert_eq!(zoom_step(&mut carry, -10.0), 1, "wheel up zooms in");
+        assert_eq!(carry, 0.0);
+        assert_eq!(zoom_step(&mut carry, 10.0), -1, "wheel down zooms out");
+        assert_eq!(carry, 0.0);
+    }
+
+    #[test]
+    fn wheel_zoom_carries_small_deltas() {
+        let mut carry = 0.0;
+        assert_eq!(zoom_step(&mut carry, -5.0), 0);
+        assert_eq!(zoom_step(&mut carry, -5.0), 1);
+        assert_eq!(carry, 0.0);
+    }
+
+    #[test]
+    fn wheel_zoom_changes_at_most_one_step_per_event() {
+        let mut carry = 0.0;
+        assert_eq!(zoom_step(&mut carry, 480.0), -1);
+        assert_eq!(carry, 0.0);
+        assert_eq!(zoom_step(&mut carry, -480.0), 1);
+    }
 }

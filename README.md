@@ -5,15 +5,16 @@
 ## 特性与架构
 
 - **顶部标签页 + 任意分屏块树**：每个标签页维护一棵分屏树（内部节点为 `aegle::Splitter`，叶子节点为 `Block`），同一标签页内可混合放置多个终端块与 aegle UI 块。
-- **极简标签栏**：标签栏以比终端背景略深的底色区分，选中标签仅以柔和底色与高对比文字标出，关闭按钮在只剩一个标签时隐藏，中键点击标签即可关闭。标签与窗口标题跟随焦点块：优先使用程序设置的 OSC 标题，否则显示前台命令与当前目录（如 `vim — ~/Axo`）。可在设置中关闭标签栏：关闭后只保留当前标签页，`Ctrl+Shift+T` 新标签与右键菜单中的 `New Tab` 一并禁用。
+- **极简标签栏**：标签栏以略微偏离终端背景的底色（深色主题略亮、浅色主题略暗）区分，选中标签以配色方案强调色（ANSI 蓝）的淡色底与高对比文字标出，关闭按钮在只剩一个标签时隐藏，中键点击标签即可关闭。标签与窗口标题跟随焦点块：优先使用程序设置的 OSC 标题，否则显示前台命令与当前目录（如 `vim — ~/Axo`）。可在设置中关闭标签栏：关闭后只保留当前标签页，`Ctrl+Shift+T` 新标签与右键菜单中的 `New Tab` 一并禁用。
 - **块右键菜单**：在终端或设置块上右键（`Menu` 键、`Shift+F10` 亦可）弹出 aegle 菜单，含复制/粘贴、向右/向下分屏、关闭块、新建标签页与设置；应用程序占用右键时按住 `Shift` 可强制打开。
 - **Vulkan（ash）终端渲染 + 渲染器接口解耦**：
   - `axo_render::Renderer` trait 抽象表面生命周期、字体度量、终端帧渲染与场景合成；上层块只依赖该接口，可接入 wgpu / CPU 等其他渲染器而不更改调用方 API。
   - `VulkanRenderer` 复用 `aegle` 的共享 Vulkan 设备与图形队列（`App::vulkan()`），通过构建期 `naga` 编译的 SPIR-V 着色器、按需填充的共享字形图集与单次实例化绘制（背景连续 run 合并 + 字形 + 光标/选区/装饰线）渲染到离屏 `R8G8B8A8_SRGB` 纹理，并以 `TextureId` 零拷贝合成进 aegle 帧。
   - 字形通过 `aegle-text`（系统字体与 CJK 回退）与 `aegle-glyph` 按需栅格化；制表符/框线字符（`U+2500..=U+259F`）按单元格像素精确生成，无缝拼接。
+- **完整配色系统**：配色方案包含默认前景/背景、光标（含光标下的文字色）、选区（含选区文字色）与 16 个 ANSI 颜色，16–255 按标准色立方与灰阶生成；内置 kitty（默认）、Catppuccin Mocha、Dracula、Gruvbox、Nord、One Dark、Solarized、Tokyo Night 等方案，并可直接读取 kitty 主题文件（`$XDG_CONFIG_HOME/axo/themes/*.conf`），也可在配置中按 `color0..color15` 单独覆盖。窗口、标签栏、菜单与控件主题全部由该方案派生，程序查询颜色（OSC 10/11）返回同一组颜色。
 - **aegle 标记语言块**：
   - 窗口骨架（`crates/axo/ui/window.aegle`）与设置块（`crates/axo/ui/settings.aegle`）均采用 `.aegle` 标记语言编写。
-  - 设置块支持字体族、字号、行高、深/浅色主题、窗口透明度（实时预乘 alpha 合成）、内边距、光标样式、回滚行数、标签栏开关与默认 Shell，即时生效并可持久化到 `$XDG_CONFIG_HOME/axo/axo.conf`。
+  - 设置块支持字体族、字号、行高、配色方案、窗口透明度（实时预乘 alpha 合成）、内边距、光标样式、回滚行数、标签栏开关与默认 Shell，即时生效并可持久化到 `$XDG_CONFIG_HOME/axo/axo.conf`。
 - **极致轻量与零空闲开销**：
   - PTY 读线程在后台完成 `vte` 解析并通过原子脏位合并 `UiProxy` 唤醒；重绘绑定到 compositor 的帧回调（每个显示帧至多一次离屏渲染），无轮询、无常驻逐帧回调，空闲 CPU 占用为 **0%**，Release 二进制约 **3.0 MiB**。
   - 屏幕与回滚历史共用单一环形缓冲，滚屏不搬移行；可打印 ASCII 走批量快路径。
@@ -23,12 +24,12 @@
 | Crate | 职责 |
 | --- | --- |
 | `crates/axo-term` | PTY（`openpty`/`fork`/`TIOCSWINSZ`）、VT 状态机（`vte`）、主/备屏与环形回滚、选区、键盘与鼠标协议编码 |
-| `crates/axo-render` | `Renderer` trait、后端无关图元布局（`quads`）、字形与框线栅格化（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`） |
+| `crates/axo-render` | `Renderer` trait、配色方案与 256 色解析（`palette`）、后端无关图元布局（`quads`）、字形与框线栅格化（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`） |
 | `crates/axo` | 配置读写、分屏树（`layout`）、块右键菜单（`menu`）、块接口与实现（`blocks::terminal`、`blocks::settings`）、标签页工作区与快捷键 |
 
 ## 构建与运行
 
-`aegle` 由 Cargo 直接从 GitHub 拉取（Linux Wayland 环境需 `libxkbcommon`、系统 Pango/Fontconfig/FreeType 及 Vulkan 1.1 驱动）：
+`aegle` 由 Cargo 直接从 GitHub 拉取（固定 revision，Linux Wayland 环境需 `libxkbcommon`、系统 Pango/Fontconfig/FreeType 及 Vulkan 1.1 驱动）：
 
 ```sh
 cargo run --release -p axo
@@ -57,6 +58,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 | 中键点击标签 | 关闭该标签页 |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | 复制选区 / 粘贴剪贴板（支持中键粘贴与括号粘贴 `2004`） |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 放大 / 缩小 / 重置字号 |
+| `Ctrl+滚轮`（终端内） | 放大 / 缩小字号（每格滚轮 1pt，等价 `Ctrl+=` / `Ctrl+-`，所有终端同步） |
 | `Shift+PageUp` / `Shift+PageDown` | 翻页滚动历史回滚区（亦支持鼠标滚轮） |
 
 ## 右键菜单
@@ -71,7 +73,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 font_family = monospace
 font_size = 14
 line_height = 1
-theme = dark
+theme = kitty
 opacity = 1
 padding = 6
 cursor = block
@@ -79,6 +81,28 @@ scrollback = 10000
 tab_bar = true
 shell =
 ```
+
+## 配色与主题
+
+`theme` 接受内置方案名（`kitty` 为默认）、`themes` 目录中的方案名，或主题文件路径；旧的 `dark`/`light` 保留为 `axo-dark`/`axo-light` 的别名。
+
+内置方案：`kitty`、`axo-dark`、`axo-light`、`catppuccin-mocha`、`dracula`、`gruvbox-dark`、`gruvbox-light`、`nord`、`one-dark`、`solarized-dark`、`solarized-light`、`tokyo-night`。
+
+自定义方案放进 `$XDG_CONFIG_HOME/axo/themes/<name>.conf`（`theme = <name>` 即生效），或写 `theme = ~/dots/my-theme.conf`。文件就是 kitty 主题格式，`key value` 或 `key = value`，非颜色键会被忽略：
+
+```ini
+# ~/.config/axo/themes/my-theme.conf
+foreground #dddddd
+background #101010
+cursor #ffcc66
+cursor_text_color #101010
+selection_background #334455
+selection_foreground #ffffff
+color0  #000000
+# …color1–color15
+```
+
+在 `axo.conf` 里写同名颜色键会覆盖所选方案的单色（例如 `background = #0b0b0b`、`color4 = #5599ff`），适合只调一两个颜色而不复制整份主题；`cursor` 在取颜色值时是光标颜色覆盖，否则仍是光标样式（`block`/`bar`/`underline`）。`cursor_text_color` 与 `selection_foreground` 可写 `none`，表示沿用单元格自身的前景色。窗口背景、控件（surface/control/muted/border/divider）、强调色（ANSI 蓝）与标签栏底色都由方案自动派生，深色/浅色主题按背景亮度判定。
 
 ## 许可证
 

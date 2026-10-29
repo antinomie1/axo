@@ -169,7 +169,7 @@ impl Term {
             responses: Vec::new(),
             display_offset: 0,
             selection: None,
-            report_colors: [[0xdd; 3], [0x1e; 3]],
+            report_colors: [[0xdd; 3], [0x00; 3]],
             scrollback,
             parser: vte::Parser::new(),
         }

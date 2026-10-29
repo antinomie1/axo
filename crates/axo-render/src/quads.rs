@@ -106,15 +106,21 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             if c.flags.has(Flags::INVERSE) {
                 (fg, bg) = (bg.unwrap_or(palette.background), Some(fg));
             }
-            if selection.is_some_and(|range| range.contains(line, x)) {
+            let selected = selection.is_some_and(|range| range.contains(line, x));
+            if selected {
                 bg = Some(palette.selection);
+                if let Some(text) = palette.selection_text {
+                    fg = text;
+                }
             }
-            if c.flags.has(Flags::DIM) {
-                fg = fg.map(|v| (v as u16 * 2 / 3) as u8);
+            if c.flags.has(Flags::DIM) && !selected {
+                fg = palette.dim(fg);
             }
             if block && cursor == Some((x, y)) {
                 bg = Some(palette.cursor);
-                fg = palette.background;
+                if let Some(text) = palette.cursor_text {
+                    fg = text;
+                }
             }
             if run.map(|r| r.1) != bg {
                 flush(&mut run, x, out);

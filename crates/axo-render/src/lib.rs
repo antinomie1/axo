@@ -4,60 +4,27 @@
 //! terminal into it, then paints the surface into its aegle scene. Callers only
 //! see the trait, so another backend (wgpu, CPU) plugs in without API changes.
 //! Shared, backend-neutral pieces live here: glyph rasterization through the
-//! aegle text stack ([`glyphs`]) and the cell-to-quad layout ([`quads`]).
+//! aegle text stack ([`glyphs`]), the cell-to-quad layout ([`quads`]) and the
+//! terminal color system ([`palette`]).
 
 mod boxdraw;
 pub mod glyphs;
+pub mod palette;
 pub mod quads;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
 use aegle::ui::scene::{Rect, SceneBuilder};
 pub use axo_term::CursorShape;
-use axo_term::{Color, Term};
+use axo_term::Term;
+
+pub use palette::Palette;
 
 pub type Error = Box<dyn std::error::Error>;
 pub type Result<T = ()> = std::result::Result<T, Error>;
 
 /// An sRGB color.
 pub type Rgb = [u8; 3];
-
-/// Colors that resolve terminal cell colors.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Palette {
-    pub foreground: Rgb,
-    pub background: Rgb,
-    pub cursor: Rgb,
-    pub selection: Rgb,
-    /// The 16 ANSI colors; 16–255 are the standard cube and gray ramp.
-    pub ansi: [Rgb; 16],
-}
-
-impl Palette {
-    /// The color of index `i` in the 256-color table.
-    pub fn indexed(&self, i: u8) -> Rgb {
-        match i {
-            0..=15 => self.ansi[i as usize],
-            16..=231 => {
-                let i = i - 16;
-                let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-                [level(i / 36), level(i / 6 % 6), level(i % 6)]
-            }
-            _ => [8 + (i - 232) * 10; 3],
-        }
-    }
-
-    /// A cell color; `None` is the default background, left transparent.
-    #[inline]
-    pub fn resolve(&self, color: Color, foreground: bool) -> Option<Rgb> {
-        match color {
-            Color::Default if foreground => Some(self.foreground),
-            Color::Default => None,
-            Color::Indexed(i) => Some(self.indexed(i)),
-            Color::Rgb(r, g, b) => Some([r, g, b]),
-        }
-    }
-}
 
 /// The terminal font.
 #[derive(Clone, Debug, PartialEq)]

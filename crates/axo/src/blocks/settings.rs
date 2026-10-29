@@ -1,6 +1,6 @@
 //! The settings block, laid out in `ui/settings.aegle`.
 
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use aegle::{
     prelude::*,
@@ -11,7 +11,7 @@ use axo_render::CursorShape;
 
 use super::{Block, next_id};
 use crate::{
-    config::{Config, ThemeName},
+    config::{Config, scheme_names},
     shared::{Msg, SharedRef},
 };
 
@@ -23,6 +23,9 @@ pub struct Settings {
     font_size: NumberField,
     line_height: NumberField,
     theme: Dropdown,
+    /// Color overrides of the loaded file; the settings keep them as they are,
+    /// and a reset to defaults clears them.
+    colors: RefCell<Vec<(String, String)>>,
     tab_bar: Switch,
     opacity: Slider,
     opacity_label: Label,
@@ -54,6 +57,7 @@ impl Settings {
             font_size: view.font_size.clone(),
             line_height: view.line_height.clone(),
             theme: view.theme.clone(),
+            colors: RefCell::new(Vec::new()),
             tab_bar: view.tab_bar.clone(),
             opacity: view.opacity.clone(),
             opacity_label: view.opacity_label.clone(),
@@ -147,10 +151,8 @@ impl Settings {
         self.font_family.set_text(&config.font_family);
         self.font_size.set_value(config.font_size as f64);
         self.line_height.set_value(config.line_height as f64);
-        self.theme.set_selected(match config.theme {
-            ThemeName::Dark => 0,
-            ThemeName::Light => 1,
-        });
+        self.fill_theme(&config.theme);
+        self.colors.replace(config.colors.clone());
         self.tab_bar.set_checked(config.tab_bar);
         self.opacity.set_value(config.opacity as f64);
         self.padding.set_value(config.padding as f64);
@@ -164,6 +166,20 @@ impl Settings {
         self.update_label(config);
     }
 
+    /// Offers every bundled scheme and every `themes/*.conf`, with the current
+    /// one selected; an unknown name (say, a scheme file that went away) stays
+    /// in the list so the choice is not silently replaced.
+    fn fill_theme(&self, theme: &str) {
+        let mut names = scheme_names();
+        match names.iter().position(|name| name == theme) {
+            Some(_) => {}
+            None => names.insert(0, theme.to_string()),
+        }
+        let items: Vec<&str> = names.iter().map(String::as_str).collect();
+        let selected = names.iter().position(|name| name == theme).unwrap_or(0);
+        self.theme.set_items(&items, selected);
+    }
+
     fn read(&self) -> Config {
         Config {
             font_family: match self.font_family.text().trim() {
@@ -172,10 +188,8 @@ impl Settings {
             },
             font_size: self.font_size.value() as f32,
             line_height: self.line_height.value() as f32,
-            theme: match self.theme.selected() {
-                1 => ThemeName::Light,
-                _ => ThemeName::Dark,
-            },
+            theme: self.theme.text(),
+            colors: self.colors.borrow().clone(),
             tab_bar: self.tab_bar.is_checked(),
             opacity: self.opacity.value() as f32,
             padding: self.padding.value() as f32,

@@ -3,13 +3,15 @@
 use std::{fs, io, path::PathBuf};
 
 use aegle::prelude::{Color, Theme};
-use axo_render::{CursorShape, FontSpec, Palette};
+use axo_render::{
+    CursorShape, FontSpec, Palette, Rgb,
+    palette::{self, SCHEMES},
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeName {
-    Dark,
-    Light,
-}
+/// Font-size bounds in logical pixels, shared by the settings, keyboard
+/// shortcuts and Ctrl+wheel zoom.
+pub const MIN_FONT_SIZE: f32 = 4.0;
+pub const MAX_FONT_SIZE: f32 = 96.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -17,7 +19,11 @@ pub struct Config {
     /// Logical pixels.
     pub font_size: f32,
     pub line_height: f32,
-    pub theme: ThemeName,
+    /// Color scheme: a bundled name, a name in the themes directory, or the
+    /// path of a scheme file.
+    pub theme: String,
+    /// Colors applied over the scheme, `(key, value)` as in the file.
+    pub colors: Vec<(String, String)>,
     /// Window opacity in `[0.3, 1]`; below 1 needs a transparent window at startup.
     pub opacity: f32,
     /// Terminal padding in logical pixels.
@@ -37,7 +43,8 @@ impl Default for Config {
             font_family: "monospace".into(),
             font_size: 14.0,
             line_height: 1.0,
-            theme: ThemeName::Dark,
+            theme: "kitty".into(),
+            colors: Vec::new(),
             opacity: 1.0,
             padding: 6.0,
             cursor: CursorShape::Block,
@@ -48,61 +55,87 @@ impl Default for Config {
     }
 }
 
-const DARK: Palette = Palette {
-    foreground: [0xc8, 0xd0, 0xe0],
-    background: [0x16, 0x18, 0x20],
-    cursor: [0xe0, 0xa0, 0x60],
-    selection: [0x34, 0x3c, 0x52],
-    ansi: [
-        [0x20, 0x24, 0x30],
-        [0xe0, 0x6c, 0x75],
-        [0x98, 0xc3, 0x79],
-        [0xe5, 0xc0, 0x7b],
-        [0x61, 0xaf, 0xef],
-        [0xc6, 0x78, 0xdd],
-        [0x56, 0xb6, 0xc2],
-        [0xc8, 0xd0, 0xe0],
-        [0x5c, 0x63, 0x70],
-        [0xff, 0x7a, 0x85],
-        [0xb5, 0xe8, 0x90],
-        [0xff, 0xd6, 0x8a],
-        [0x7c, 0xc4, 0xff],
-        [0xdd, 0x95, 0xf0],
-        [0x70, 0xd8, 0xe4],
-        [0xff, 0xff, 0xff],
-    ],
-};
+/// The Axo configuration directory: `$XDG_CONFIG_HOME/axo`.
+fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|base| base.join("axo"))
+}
 
-const LIGHT: Palette = Palette {
-    foreground: [0x30, 0x34, 0x40],
-    background: [0xfa, 0xfa, 0xf8],
-    cursor: [0x52, 0x6f, 0xff],
-    selection: [0xd0, 0xdc, 0xf4],
-    ansi: [
-        [0x30, 0x34, 0x40],
-        [0xc8, 0x28, 0x29],
-        [0x40, 0x8a, 0x2a],
-        [0x9a, 0x6a, 0x00],
-        [0x20, 0x60, 0xd0],
-        [0x9a, 0x2f, 0xb0],
-        [0x10, 0x84, 0x90],
-        [0xd8, 0xd8, 0xd4],
-        [0x70, 0x76, 0x80],
-        [0xe0, 0x40, 0x40],
-        [0x50, 0xa1, 0x4f],
-        [0xc1, 0x84, 0x01],
-        [0x40, 0x78, 0xf2],
-        [0xa6, 0x26, 0xa4],
-        [0x01, 0x84, 0xbc],
-        [0xff, 0xff, 0xff],
-    ],
-};
+/// Where custom color schemes live: `$XDG_CONFIG_HOME/axo/themes`.
+pub fn theme_dir() -> Option<PathBuf> {
+    Some(config_dir()?.join("themes"))
+}
 
 fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("axo").join("axo.conf"))
+    Some(config_dir()?.join("axo.conf"))
+}
+
+/// The schemes the settings offer: bundled names first, then each `.conf` file
+/// in the themes directory, alphabetically.
+pub fn scheme_names() -> Vec<String> {
+    let mut names: Vec<String> = SCHEMES
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    if let Some(dir) = theme_dir()
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        let mut custom: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("conf"))
+            .filter_map(|entry| {
+                entry
+                    .path()
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .collect();
+        custom.sort();
+        for name in custom {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// `~/…` paths are relative to `$HOME`.
+fn expand_home(path: &str) -> PathBuf {
+    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
+fn color(rgb: Rgb) -> Color {
+    Color::rgb(rgb[0], rgb[1], rgb[2])
+}
+
+/// The scheme last reported as unreadable, so a broken `theme` warns once
+/// instead of on every settings change.
+static WARNED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn warn_unreadable(theme: &str, error: &str) {
+    let mut warned = WARNED.lock().unwrap_or_else(|error| error.into_inner());
+    if warned.as_deref() == Some(theme) {
+        return;
+    }
+    eprintln!("axo: color scheme `{theme}`: {error}; using the default");
+    *warned = Some(theme.to_string());
+}
+
+/// Records a validated color override, replacing an earlier one for the key.
+fn override_color(config: &mut Config, key: &str, value: &str) {
+    if palette::parse_color(value).is_none() {
+        return;
+    }
+    match config.colors.iter_mut().find(|(name, _)| name == key) {
+        Some((_, current)) => *current = value.into(),
+        None => config.colors.push((key.into(), value.into())),
+    }
 }
 
 impl Config {
@@ -121,21 +154,17 @@ impl Config {
             match key {
                 "font_family" if !value.is_empty() => config.font_family = value.into(),
                 "font_size" => {
-                    config.font_size = float().map_or(config.font_size, |v| v.clamp(4.0, 96.0))
+                    config.font_size =
+                        float().map_or(config.font_size, |v| v.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE))
                 }
                 "line_height" => {
                     config.line_height = float().map_or(config.line_height, |v| v.clamp(0.5, 3.0))
                 }
-                "theme" => {
-                    config.theme = if value == "light" {
-                        ThemeName::Light
-                    } else {
-                        ThemeName::Dark
-                    }
-                }
-                "opacity" => config.opacity = float().map_or(config.opacity, |v| v.clamp(0.3, 1.0)),
-                "padding" => {
-                    config.padding = float().map_or(config.padding, |v| v.clamp(0.0, 64.0))
+                "theme" if !value.is_empty() => config.theme = value.into(),
+                // `cursor` is the shape, unless it names a color, which makes
+                // it a cursor color override.
+                "cursor" if palette::parse_color(value).is_some() => {
+                    override_color(&mut config, key, value);
                 }
                 "cursor" => {
                     config.cursor = match value {
@@ -143,6 +172,11 @@ impl Config {
                         "underline" => CursorShape::Underline,
                         _ => CursorShape::Block,
                     }
+                }
+                key if palette::is_color_key(key) => override_color(&mut config, key, value),
+                "opacity" => config.opacity = float().map_or(config.opacity, |v| v.clamp(0.3, 1.0)),
+                "padding" => {
+                    config.padding = float().map_or(config.padding, |v| v.clamp(0.0, 64.0))
                 }
                 "scrollback" => {
                     config.scrollback = value
@@ -166,26 +200,26 @@ impl Config {
     pub fn save(&self) -> io::Result<PathBuf> {
         let path = path().ok_or_else(|| io::Error::other("no HOME or XDG_CONFIG_HOME"))?;
         fs::create_dir_all(path.parent().unwrap())?;
-        let theme = match self.theme {
-            ThemeName::Dark => "dark",
-            ThemeName::Light => "light",
-        };
         let cursor = match self.cursor {
             CursorShape::Block => "block",
             CursorShape::Bar => "bar",
             CursorShape::Underline => "underline",
         };
-        let text = format!(
-            "# Axo Terminal settings\nfont_family = {}\nfont_size = {}\nline_height = {}\ntheme = {theme}\nopacity = {}\npadding = {}\ncursor = {cursor}\nscrollback = {}\ntab_bar = {}\nshell = {}\n",
+        let mut text = format!(
+            "# Axo Terminal settings\nfont_family = {}\nfont_size = {}\nline_height = {}\ntheme = {}\nopacity = {}\npadding = {}\ncursor = {cursor}\nscrollback = {}\ntab_bar = {}\nshell = {}\n",
             self.font_family,
             self.font_size,
             self.line_height,
+            self.theme,
             self.opacity,
             self.padding,
             self.scrollback,
             self.tab_bar,
             self.shell,
         );
+        for (key, value) in &self.colors {
+            text.push_str(&format!("{key} = {value}\n"));
+        }
         fs::write(&path, text)?;
         Ok(path)
     }
@@ -198,11 +232,47 @@ impl Config {
         }
     }
 
+    /// The color scheme named by `theme`, then the per-color overrides on top.
     pub fn palette(&self) -> Palette {
-        match self.theme {
-            ThemeName::Dark => DARK,
-            ThemeName::Light => LIGHT,
+        let mut scheme = match palette::builtin(&self.theme) {
+            Some(scheme) => scheme,
+            None if self.theme.trim().is_empty() => Palette::default(),
+            None => match self.read_theme() {
+                Ok(scheme) => scheme,
+                Err(error) => {
+                    warn_unreadable(&self.theme, &error);
+                    Palette::default()
+                }
+            },
+        };
+        for (key, value) in &self.colors {
+            if let Some(rgb) = palette::parse_color(value) {
+                scheme.set_color(key, rgb);
+            }
         }
+        scheme
+    }
+
+    fn read_theme(&self) -> Result<Palette, String> {
+        let path = self
+            .theme_path()
+            .ok_or_else(|| "no themes directory".to_string())?;
+        let text =
+            fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        Palette::parse(&text).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
+    /// Where `theme` points: a path (contains `/` or ends in `.conf`) or
+    /// `<themes dir>/<name>.conf`.
+    fn theme_path(&self) -> Option<PathBuf> {
+        let name = self.theme.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if name.contains('/') || name.ends_with(".conf") {
+            return Some(expand_home(name));
+        }
+        Some(theme_dir()?.join(format!("{name}.conf")))
     }
 
     pub fn shell(&self) -> String {
@@ -212,49 +282,132 @@ impl Config {
         }
     }
 
-    /// The window theme: the terminal background, at `opacity` when the window is
-    /// transparent, behind every block.
+    /// The window theme: the scheme's background behind every block, with the
+    /// surrounding chrome shaded from the same colors, so the whole window
+    /// follows the terminal scheme.
     pub fn theme(&self, transparent: bool) -> Theme {
-        let palette = self.palette();
-        let base = match self.theme {
-            ThemeName::Dark => Theme::dark(),
-            ThemeName::Light => Theme::light(),
-        };
-        let alpha = if transparent {
-            (self.opacity * 255.0).round() as u8
-        } else {
-            255
-        };
-        let [r, g, b] = palette.background;
-        let [fr, fg, fb] = palette.foreground;
-        Theme {
-            background: Color::rgba(r, g, b, alpha),
-            foreground: Color::rgb(fr, fg, fb),
-            radius: 4.0,
-            ..base
-        }
-    }
-
-    /// The tab bar's fill: the window background pushed a shade darker, so the
-    /// chrome reads as a strip above the terminal in both themes and keeps the
-    /// window's opacity.
-    pub fn bar_color(&self, transparent: bool) -> Color {
-        let [r, g, b] = self.palette().background;
-        let shade = match self.theme {
-            ThemeName::Dark => 0.70,
-            ThemeName::Light => 0.92,
-        };
-        let channel = |value: u8| (f32::from(value) * shade).round() as u8;
+        let scheme = self.palette();
+        let light = scheme.is_light();
+        let (bg, fg) = (scheme.background, scheme.foreground);
+        let accent = scheme.ansi[4];
         let alpha = match transparent {
             true => (self.opacity * 255.0).round() as u8,
             false => 255,
         };
-        Color::rgba(channel(r), channel(g), channel(b), alpha)
+        let shade = |amount: f32| color(palette::mix(bg, fg, amount));
+        let on_accent = match palette::contrast(accent, bg) >= palette::contrast(accent, fg) {
+            true => bg,
+            false => fg,
+        };
+        Theme {
+            background: Color::rgba(bg[0], bg[1], bg[2], alpha),
+            surface: shade(if light { 0.05 } else { 0.09 }),
+            control: shade(if light { 0.11 } else { 0.16 }),
+            foreground: color(fg),
+            muted: shade(0.6),
+            border: shade(if light { 0.48 } else { 0.55 }),
+            divider: shade(if light { 0.18 } else { 0.24 }),
+            accent: color(accent),
+            on_accent: color(on_accent),
+            hover: Color::rgba(fg[0], fg[1], fg[2], 15),
+            pressed: Color::rgba(fg[0], fg[1], fg[2], 30),
+            radius: 4.0,
+            ..match light {
+                true => Theme::light(),
+                false => Theme::dark(),
+            }
+        }
     }
 
-    /// The active tab's fill: a faint foreground wash over the bar.
+    /// The tab bar's fill: the scheme background nudged toward the text color,
+    /// so the bar separates from the terminal even for pure black or pure
+    /// white backgrounds, and keeps the window's opacity.
+    pub fn bar_color(&self, transparent: bool) -> Color {
+        let scheme = self.palette();
+        let amount = match scheme.is_light() {
+            true => 0.06,
+            false => 0.09,
+        };
+        let [r, g, b] = palette::mix(scheme.background, scheme.foreground, amount);
+        let alpha = match transparent {
+            true => (self.opacity * 255.0).round() as u8,
+            false => 255,
+        };
+        Color::rgba(r, g, b, alpha)
+    }
+
+    /// The active tab's fill: a wash of the scheme's accent (ANSI blue) over
+    /// the bar.
     pub fn tab_fill(&self) -> Color {
-        let [r, g, b] = self.palette().foreground;
-        Color::rgba(r, g, b, 18)
+        let scheme = self.palette();
+        let [r, g, b] = scheme.ansi[4];
+        let alpha = match scheme.is_light() {
+            true => 26,
+            false => 38,
+        };
+        Color::rgba(r, g, b, alpha)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_theme(theme: &str) -> Config {
+        Config {
+            theme: theme.into(),
+            ..Config::default()
+        }
+    }
+
+    fn luminance(color: Color) -> f32 {
+        let [r, g, b, _] = color.to_rgba();
+        palette::luminance([r, g, b])
+    }
+
+    #[test]
+    fn the_default_config_uses_kitty() {
+        let config = Config::default();
+        assert_eq!(config.theme, "kitty");
+        assert!(config.colors.is_empty());
+        assert_eq!(config.palette(), palette::KITTY);
+        let theme = config.theme(false);
+        let [r, g, b] = palette::KITTY.background;
+        assert_eq!(theme.background, Color::rgba(r, g, b, 255));
+        assert_eq!(theme.foreground, color(palette::KITTY.foreground));
+        assert_eq!(theme.accent, color(palette::KITTY.ansi[4]));
+        // The tab bar must separate from a pure black background.
+        assert_ne!(config.bar_color(false), theme.background);
+    }
+
+    #[test]
+    fn legacy_theme_names_keep_the_old_look() {
+        assert_eq!(with_theme("dark").palette(), palette::AXO_DARK);
+        assert_eq!(with_theme("light").palette(), palette::AXO_LIGHT);
+        assert_eq!(
+            with_theme("Solarized_Light").palette(),
+            palette::SOLARIZED_LIGHT
+        );
+    }
+
+    #[test]
+    fn window_theme_follows_the_scheme_brightness() {
+        let dark = Config::default().theme(false);
+        assert!(luminance(dark.surface) > luminance(dark.background));
+        assert!(luminance(dark.surface) < luminance(dark.foreground));
+        let light = with_theme("solarized-light").theme(false);
+        assert!(luminance(light.surface) < luminance(light.background));
+        assert!(luminance(light.foreground) < luminance(light.surface));
+    }
+
+    #[test]
+    fn opacity_applies_to_the_window_background_only() {
+        let config = Config {
+            opacity: 0.5,
+            ..Config::default()
+        };
+        assert_eq!(config.theme(true).background.to_rgba()[3], 128);
+        assert_eq!(config.bar_color(true).to_rgba()[3], 128);
+        assert_eq!(config.theme(false).background.to_rgba()[3], 255);
     }
 }

@@ -8,19 +8,16 @@ use aegle::prelude::{Appearance, Color, Theme, VisualState};
 /// The pill radius shared by tabs and bar buttons.
 const RADIUS: f32 = 6.0;
 
-/// Text away from the pointer: the palette foreground quieted toward the
-/// window background.
+/// Text away from the pointer: the palette's muted color.
 fn quiet_text(theme: &Theme) -> Color {
-    let base = theme.background.with_alpha(255);
-    let text = theme.foreground.with_alpha(255);
-    base.mix(text, 0.62)
+    theme.muted.with_alpha(255)
 }
 
 /// The layer a pressed or hovered chrome control adds under its contents.
 fn layer(theme: &Theme, state: VisualState) -> Color {
     match state.enabled {
-        true if state.pressed => theme.foreground.with_alpha(24),
-        true if state.hovered => theme.foreground.with_alpha(10),
+        true if state.pressed => theme.pressed,
+        true if state.hovered => theme.hover,
         _ => Color::TRANSPARENT,
     }
 }
