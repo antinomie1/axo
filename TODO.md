@@ -6,7 +6,7 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 
 ```
 ┌──────────────────────────── aegle Window (Vulkan 渲染器, Wayland) ──────────────────────────┐
-│ 标签栏（顶部，aegle 控件）  [tab1] [tab2] [+]                                    [Settings] │
+│ 标签栏（顶部，aegle 控件）  [tab1] [tab2]  +                                ⚙ │
 ├──────────────────────────────────────────────────────────────────────────────────────────────┤
 │ Tab 页面 = 块树（Layout）：叶子是块（Block），内部节点是 aegle Splitter（水平/垂直）         │
 │  ┌───────────────┬──────────────┐                                                          │
@@ -58,9 +58,9 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 
 ### M3 应用 `axo`
 - [x] 配置：`~/.config/axo/axo.conf`（`key = value`，无 serde）
-- [x] 标签页（顶部，`ui/window.aegle`）：新建、关闭、切换、标题跟随焦点块 OSC 标题
+- [x] 标签页（顶部，`ui/window.aegle`）：新建、关闭、切换；标题跟随焦点块（OSC 标题优先，否则前台命令 + 当前目录）
 - [x] 块与分屏：每个标签页一棵块树；水平/垂直分屏、关闭块、焦点在块间按方向移动
-- [x] 设置块（aegle 标记 `ui/settings.aegle`）：字体族、字号、行高、主题、窗口透明度、内边距、光标样式、回滚行数、shell；即时应用并保存
+- [x] 设置块（aegle 标记 `ui/settings.aegle`）：字体族、字号、行高、主题、窗口透明度、内边距、光标样式、回滚行数、标签栏开关、shell；即时应用并保存
 - [x] 快捷键（见 README.md）
 
 ### M3.5 性能优化

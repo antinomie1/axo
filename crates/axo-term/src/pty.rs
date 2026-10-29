@@ -109,6 +109,13 @@ impl Pty {
     }
 }
 
+/// The foreground process group of the terminal on `master`, when it has one.
+pub fn foreground(master: &File) -> Option<u32> {
+    // SAFETY: tcgetpgrp only reads the terminal's state from a valid descriptor.
+    let pgrp = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
+    (pgrp > 0).then_some(pgrp as u32)
+}
+
 /// Asks the child's session to hang up, as closing a terminal window does.
 pub fn hang_up(pid: u32) {
     // SAFETY: kill has no memory effects; the child leads its own process group.

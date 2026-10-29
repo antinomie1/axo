@@ -29,6 +29,8 @@ pub struct BlockMenu {
     popup: Popup,
     copy: MenuItem,
     paste: MenuItem,
+    new_tab: MenuItem,
+    shared: SharedRef,
     /// Whether the block is a terminal, and whether it has a selection.
     /// `None` for blocks without a clipboard.
     clipboard: Option<Rc<dyn Fn() -> bool>>,
@@ -66,13 +68,15 @@ impl BlockMenu {
         command("Split Down", MenuCommand::SplitDown, "Ctrl+Shift+E");
         popup.separator();
         command("Close Pane", MenuCommand::ClosePane, "Ctrl+Shift+W");
-        command("New Tab", MenuCommand::NewTab, "Ctrl+Shift+T");
+        let new_tab = command("New Tab", MenuCommand::NewTab, "Ctrl+Shift+T");
         popup.separator();
         command("Settings", MenuCommand::Settings, "Ctrl+,");
         Self {
             popup,
             copy,
             paste,
+            new_tab,
+            shared: shared.clone(),
             clipboard,
         }
     }
@@ -86,6 +90,10 @@ impl BlockMenu {
         };
         self.copy.set_enabled(copy);
         self.paste.set_enabled(paste);
+        // New tabs need the tab bar; without it the workspace is one tab.
+        let tabs = self.shared.config.borrow().tab_bar;
+        self.new_tab.set_enabled(tabs);
+        self.new_tab.set_visible(tabs);
         self.popup.show_at(at);
     }
 }

@@ -1,6 +1,7 @@
 //! Axo Terminal: tabs of split blocks on aegle; terminals render with Vulkan.
 
 mod blocks;
+mod chrome;
 mod config;
 mod keys;
 mod layout;

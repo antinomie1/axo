@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    pty::{Pty, WinSize, hang_up},
+    pty::{Pty, WinSize, foreground, hang_up},
     term::Term,
 };
 
@@ -135,6 +135,15 @@ impl Session {
     /// The shell's working directory, for opening new terminals next to it.
     pub fn cwd(&self) -> Option<PathBuf> {
         std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()
+    }
+
+    /// The command in the foreground, and whether it is the shell itself
+    /// (idle at its prompt); read from `/proc`, so it is cheap but not free.
+    pub fn foreground(&self) -> Option<(String, bool)> {
+        let pgrp = foreground(&self.master)?;
+        let name = std::fs::read_to_string(format!("/proc/{pgrp}/comm")).ok()?;
+        let name = name.trim_end();
+        (!name.is_empty()).then(|| (name.to_owned(), pgrp == self.pid))
     }
 }
 

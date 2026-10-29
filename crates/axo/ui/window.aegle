@@ -7,13 +7,13 @@ Window {
     gap: 0dp
     Row {
         id: bar
-        height: 34dp
-        padding: [2dp, 6dp]
-        gap: 4dp
+        height: 32dp
+        padding: [0dp, 8dp]
+        gap: 2dp
         align: center
-        Row { id: tabs; gap: 4dp; grow: 1; basis: 0dp; align: center }
+        Row { id: tabs; gap: 2dp; grow: 1; basis: 0dp; align: center }
         Button { id: add; text: "+"; tooltip: "New tab (Ctrl+Shift+T)" }
-        Button { id: settings; text: "Settings"; tooltip: "Settings (Ctrl+,)" }
+        Button { id: settings; text: "⚙"; tooltip: "Settings (Ctrl+,)" }
     }
     Column { id: pages; grow: 1; basis: 0dp; gap: 0dp }
 }

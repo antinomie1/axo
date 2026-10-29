@@ -12,7 +12,7 @@ use axo_render::CursorShape;
 use super::{Block, next_id};
 use crate::{
     config::{Config, ThemeName},
-    shared::SharedRef,
+    shared::{Msg, SharedRef},
 };
 
 pub struct Settings {
@@ -23,6 +23,7 @@ pub struct Settings {
     font_size: NumberField,
     line_height: NumberField,
     theme: Dropdown,
+    tab_bar: Switch,
     opacity: Slider,
     opacity_label: Label,
     padding: NumberField,
@@ -53,6 +54,7 @@ impl Settings {
             font_size: view.font_size.clone(),
             line_height: view.line_height.clone(),
             theme: view.theme.clone(),
+            tab_bar: view.tab_bar.clone(),
             opacity: view.opacity.clone(),
             opacity_label: view.opacity_label.clone(),
             padding: view.padding.clone(),
@@ -95,6 +97,8 @@ impl Settings {
             dropdown.on_change(move |_| on());
         }
         let on = changed.clone();
+        view.tab_bar.on_change(move |_| on());
+        let on = changed.clone();
         view.opacity.on_change(move |_| on());
 
         let weak = Rc::downgrade(&settings);
@@ -121,12 +125,19 @@ impl Settings {
         settings
             .root
             .on_input_capture(move |_, event: &mut aegle::ui::InputEvent<'_>| {
-                if let InputKind::Pointer {
-                    kind: PointerKind::Down { .. },
-                    ..
-                } = event.kind
-                {
+                let focusing = match event.kind {
+                    InputKind::Pointer {
+                        kind: PointerKind::Down { .. },
+                        ..
+                    } => true,
+                    InputKind::Key(key) => key.pressed,
+                    _ => false,
+                };
+                if focusing && shared.focused.get() != id {
                     shared.focused.set(id);
+                    if let Some(proxy) = shared.proxy.get() {
+                        let _ = proxy.send(Msg::Focus(id));
+                    }
                 }
             });
         Ok(settings)
@@ -140,6 +151,7 @@ impl Settings {
             ThemeName::Dark => 0,
             ThemeName::Light => 1,
         });
+        self.tab_bar.set_checked(config.tab_bar);
         self.opacity.set_value(config.opacity as f64);
         self.padding.set_value(config.padding as f64);
         self.cursor.set_selected(match config.cursor {
@@ -164,6 +176,7 @@ impl Settings {
                 1 => ThemeName::Light,
                 _ => ThemeName::Dark,
             },
+            tab_bar: self.tab_bar.is_checked(),
             opacity: self.opacity.value() as f32,
             padding: self.padding.value() as f32,
             cursor: match self.cursor.selected() {
@@ -204,6 +217,9 @@ impl Block for Settings {
     fn apply(&self, config: &Config) {
         if (self.font_size.value() as f32 - config.font_size).abs() > 0.01 {
             self.font_size.set_value(config.font_size as f64);
+        }
+        if self.tab_bar.is_checked() != config.tab_bar {
+            self.tab_bar.set_checked(config.tab_bar);
         }
         self.update_label(config);
     }

@@ -5,6 +5,7 @@
 ## 特性与架构
 
 - **顶部标签页 + 任意分屏块树**：每个标签页维护一棵分屏树（内部节点为 `aegle::Splitter`，叶子节点为 `Block`），同一标签页内可混合放置多个终端块与 aegle UI 块。
+- **极简标签栏**：标签栏以比终端背景略深的底色区分，选中标签仅以柔和底色与高对比文字标出，关闭按钮在只剩一个标签时隐藏，中键点击标签即可关闭。标签与窗口标题跟随焦点块：优先使用程序设置的 OSC 标题，否则显示前台命令与当前目录（如 `vim — ~/Axo`）。可在设置中关闭标签栏：关闭后只保留当前标签页，`Ctrl+Shift+T` 新标签与右键菜单中的 `New Tab` 一并禁用。
 - **块右键菜单**：在终端或设置块上右键（`Menu` 键、`Shift+F10` 亦可）弹出 aegle 菜单，含复制/粘贴、向右/向下分屏、关闭块、新建标签页与设置；应用程序占用右键时按住 `Shift` 可强制打开。
 - **Vulkan（ash）终端渲染 + 渲染器接口解耦**：
   - `axo_render::Renderer` trait 抽象表面生命周期、字体度量、终端帧渲染与场景合成；上层块只依赖该接口，可接入 wgpu / CPU 等其他渲染器而不更改调用方 API。
@@ -12,7 +13,7 @@
   - 字形通过 `aegle-text`（系统字体与 CJK 回退）与 `aegle-glyph` 按需栅格化；制表符/框线字符（`U+2500..=U+259F`）按单元格像素精确生成，无缝拼接。
 - **aegle 标记语言块**：
   - 窗口骨架（`crates/axo/ui/window.aegle`）与设置块（`crates/axo/ui/settings.aegle`）均采用 `.aegle` 标记语言编写。
-  - 设置块支持字体族、字号、行高、深/浅色主题、窗口透明度（实时预乘 alpha 合成）、内边距、光标样式、回滚行数与默认 Shell，即时生效并可持久化到 `$XDG_CONFIG_HOME/axo/axo.conf`。
+  - 设置块支持字体族、字号、行高、深/浅色主题、窗口透明度（实时预乘 alpha 合成）、内边距、光标样式、回滚行数、标签栏开关与默认 Shell，即时生效并可持久化到 `$XDG_CONFIG_HOME/axo/axo.conf`。
 - **极致轻量与零空闲开销**：
   - PTY 读线程在后台完成 `vte` 解析并通过原子脏位合并 `UiProxy` 唤醒；重绘绑定到 compositor 的帧回调（每个显示帧至多一次离屏渲染），无轮询、无常驻逐帧回调，空闲 CPU 占用为 **0%**，Release 二进制约 **3.0 MiB**。
   - 屏幕与回滚历史共用单一环形缓冲，滚屏不搬移行；可打印 ASCII 走批量快路径。
@@ -44,7 +45,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | 快捷键 | 功能 |
 | --- | --- |
-| `Ctrl+Shift+T` | 新建标签页 |
+| `Ctrl+Shift+T` | 新建标签页（标签栏关闭时禁用） |
 | `Ctrl+Shift+D` | 向右分屏（新建终端块） |
 | `Ctrl+Shift+E` | 向下分屏（新建终端块） |
 | `Ctrl+Shift+W` | 关闭当前焦点块（最后一个块关闭标签页） |
@@ -53,6 +54,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 | `Ctrl+Tab` / `Ctrl+PageDown` | 下一个标签页 |
 | `Ctrl+Shift+Tab` / `Ctrl+PageUp` | 上一个标签页 |
 | `Alt+1..9` | 切换到第 1..9 个标签页 |
+| 中键点击标签 | 关闭该标签页 |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | 复制选区 / 粘贴剪贴板（支持中键粘贴与括号粘贴 `2004`） |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 放大 / 缩小 / 重置字号 |
 | `Shift+PageUp` / `Shift+PageDown` | 翻页滚动历史回滚区（亦支持鼠标滚轮） |
@@ -74,6 +76,7 @@ opacity = 1
 padding = 6
 cursor = block
 scrollback = 10000
+tab_bar = true
 shell =
 ```
 

@@ -7,10 +7,15 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use aegle::{app::Window, prelude::*, ui::KeyEvent};
+use aegle::{
+    app::Window,
+    prelude::*,
+    ui::{InputKind, KeyEvent, NodeId, PointerButton, PointerKind},
+};
 
 use crate::{
     blocks::{Block, BlockRef, Settings, Terminal},
+    chrome,
     config::Config,
     keys::{self, Action, Dir},
     layout::Pane,
@@ -22,6 +27,7 @@ struct Tab {
     id: u64,
     item: Container,
     title: Button,
+    close: Button,
     page: Container,
     root: Pane,
     /// The block focused last in this tab.
@@ -44,6 +50,8 @@ pub struct Workspace {
     pages: Container,
     tabs: RefCell<Vec<Tab>>,
     active: Cell<usize>,
+    /// The window title last set, so output frames do not resend it.
+    window_title: RefCell<String>,
     shared: SharedRef,
 }
 
@@ -52,7 +60,7 @@ enum Kind {
     Settings,
 }
 
-const TITLE_CHARS: usize = 28;
+const TITLE_CHARS: usize = 24;
 
 impl Workspace {
     pub fn new(
@@ -70,6 +78,7 @@ impl Workspace {
             pages,
             tabs: RefCell::new(Vec::new()),
             active: Cell::new(0),
+            window_title: RefCell::new(String::new()),
             shared,
         });
         workspace.style_bar();
@@ -85,9 +94,13 @@ impl Workspace {
         self.this.upgrade().expect("workspace alive")
     }
 
+    /// The bar is a shade darker than the terminal, so the tabs sit on a
+    /// subtle strip of chrome; it can be turned off entirely in the settings.
     fn style_bar(&self) {
+        let config = self.shared.config.borrow();
         self.bar
-            .set_background(self.shared.config.borrow().bar_color());
+            .set_background(config.bar_color(self.shared.transparent));
+        self.bar.set_visible(config.tab_bar);
     }
 
     /// The focused terminal's directory, where new terminals start.
@@ -115,6 +128,10 @@ impl Workspace {
     // ---- tabs ----
 
     pub fn new_tab(&self) -> Result<()> {
+        // Without the tab bar the workspace is a single tab.
+        if !self.shared.config.borrow().tab_bar && !self.tabs.borrow().is_empty() {
+            return Ok(());
+        }
         let page = self.pages.column();
         page.set_grow(1.0);
         page.set_basis(0.0);
@@ -134,10 +151,34 @@ impl Workspace {
         let item = self.tab_row.row();
         item.set_gap(0.0, 0.0);
         item.set_min_width(0.0);
+        item.set_align_items(Align::Center);
+        item.set_radius(6.0);
         let title = item.button("Terminal");
         title.set_min_width(0.0);
+        title.set_height(24.0);
+        title.set_padding(2.5);
+        title.set_font_size(13.0);
+        title.set_skin(Some(chrome::quiet));
         let close = item.button("×");
         close.set_tooltip("Close tab");
+        close.set_accessible_label("Close tab");
+        close.set_height(20.0);
+        close.set_padding(3.0);
+        close.set_font_size(14.0);
+        close.set_skin(Some(chrome::close));
+        // Middle-clicking a tab closes it, like most tabbed browsers.
+        let ws = self.this.clone();
+        item.on_input(move |_, event| {
+            if let InputKind::Pointer {
+                kind: PointerKind::ButtonDown(PointerButton::Middle),
+                ..
+            } = event.kind
+                && let Some(ws) = ws.upgrade()
+                && let Some(index) = ws.tab_index(id)
+            {
+                ws.close_tab(index);
+            }
+        });
         let ws = self.this.clone();
         title.on_click(move |_| {
             if let Some(ws) = ws.upgrade()
@@ -161,6 +202,7 @@ impl Workspace {
                 id,
                 item,
                 title,
+                close,
                 page,
                 root: Pane::Leaf(block),
                 focused,
@@ -188,7 +230,6 @@ impl Workspace {
             let Some(tab) = tabs.get(index) else { return };
             for (i, tab) in tabs.iter().enumerate() {
                 tab.page.set_visible(i == index);
-                tab.title.set_accent(i == index);
             }
             self.active.set(index);
             let blocks = tab.blocks();
@@ -202,10 +243,34 @@ impl Workspace {
             self.shared.focused.set(block.id());
             block.focus();
         }
+        self.style_tabs();
         self.update_titles();
     }
 
-    fn close_tab(&self, index: usize) {
+    /// Marks the active tab with a soft fill and full-contrast label; close
+    /// glyphs appear once there is more than one tab. Also run after a theme
+    /// change, so the bar keeps following the palette.
+    fn style_tabs(&self) {
+        let tabs = self.tabs.borrow();
+        let active = self.active.get();
+        let fill = self.shared.config.borrow().tab_fill();
+        let show_close = tabs.len() > 1;
+        for (i, tab) in tabs.iter().enumerate() {
+            let selected = i == active;
+            let skin = if selected {
+                chrome::active
+            } else {
+                chrome::quiet
+            };
+            tab.title.set_skin(Some(skin));
+            tab.item.set_background(selected.then_some(fill));
+            tab.close.set_visible(show_close);
+        }
+    }
+
+    /// Removes tab `index` and its blocks; returns where to go next, or `None`
+    /// when no tab remains.
+    fn remove_tab(&self, index: usize) -> Option<usize> {
         let tab = self.tabs.borrow_mut().remove(index);
         for block in tab.blocks() {
             block.close();
@@ -213,10 +278,33 @@ impl Workspace {
         tab.item.remove();
         tab.page.remove();
         let len = self.tabs.borrow().len();
-        if len == 0 {
-            let _ = self.window.close();
-        } else {
-            self.select(index.min(len - 1));
+        (len > 0).then(|| index.min(len - 1))
+    }
+
+    fn close_tab(&self, index: usize) {
+        match self.remove_tab(index) {
+            Some(next) => self.select(next),
+            None => {
+                let _ = self.window.close();
+            }
+        }
+    }
+
+    /// Keeps the tab being viewed and closes the rest, for when the tab bar is
+    /// turned off. Focus stays where the user left it.
+    fn collapse_tabs(&self) {
+        let Some(keep) = self.tabs.borrow().get(self.active.get()).map(|tab| tab.id) else {
+            return;
+        };
+        loop {
+            let index = self.tabs.borrow().iter().position(|tab| tab.id != keep);
+            let Some(index) = index else {
+                break;
+            };
+            let _ = self.remove_tab(index);
+            if index < self.active.get() {
+                self.active.set(self.active.get() - 1);
+            }
         }
     }
 
@@ -246,7 +334,12 @@ impl Workspace {
                 tab.title.set_tooltip(title.as_str());
             }
             if i == self.active.get() {
-                let _ = self.window.set_title(&format!("{title} — Axo"));
+                let title = format!("{title} — Axo");
+                let mut current = self.window_title.borrow_mut();
+                if *current != title {
+                    current.clone_from(&title);
+                    let _ = self.window.set_title(&title);
+                }
             }
         }
     }
@@ -414,12 +507,12 @@ impl Workspace {
                     .borrow()
                     .iter()
                     .find_map(|tab| tab.blocks().into_iter().find(|b| b.id() == id));
-                if let Some(terminal) = block.as_ref().and_then(|b| b.as_terminal())
-                    && terminal.wake().is_some()
-                {
-                    self.update_titles();
+                if let Some(terminal) = block.as_ref().and_then(|b| b.as_terminal()) {
+                    terminal.wake();
                 }
+                self.update_titles();
             }
+            Msg::Focus(id) => self.focus_from_input(id),
             Msg::Exit(id) => self.close_block(id),
             Msg::Action(action) => {
                 if let Err(error) = self.run(action) {
@@ -432,6 +525,57 @@ impl Workspace {
                 }
             }
         }
+    }
+
+    /// The block holding keyboard focus right now, found by walking up from
+    /// the UI's focused node. Focus messages can outlive the focus change that
+    /// sent them, so this is what decides which pane a message is about.
+    fn focused_block_now(&self) -> Option<u64> {
+        let focused = self
+            .window
+            .ui()
+            .with_state(|state| Ok(state.focused()))
+            .ok()
+            .flatten()?;
+        let mut node = self.bar.handle(focused);
+        loop {
+            if let Some(id) = self.block_at_node(node.id()) {
+                return Some(id);
+            }
+            let parent = node.parent()?;
+            node = (*parent).clone();
+        }
+    }
+
+    /// The block whose root is `node`, if any.
+    fn block_at_node(&self, node: NodeId) -> Option<u64> {
+        self.tabs.borrow().iter().find_map(|tab| {
+            tab.blocks()
+                .into_iter()
+                .find(|block| block.node().id() == node)
+                .map(|block| block.id())
+        })
+    }
+
+    /// Records the block that took keyboard focus from the UI itself, so the
+    /// tab and window titles follow the focused pane.
+    fn focus_from_input(&self, id: u64) {
+        if self.focused_block_now() != Some(id) {
+            return;
+        }
+        let Some(index) = self.tab_of_block(id) else {
+            return;
+        };
+        let mut tabs = self.tabs.borrow_mut();
+        let Some(tab) = tabs.get_mut(index) else {
+            return;
+        };
+        if tab.focused == id {
+            return;
+        }
+        tab.focused = id;
+        drop(tabs);
+        self.update_titles();
     }
 
     fn key(&self, event: &KeyEvent<'_>) -> bool {
@@ -565,8 +709,12 @@ impl Workspace {
         if old.theme != config.theme || old.opacity != config.opacity {
             *self.shared.palette.borrow_mut() = config.palette();
             self.window.set_theme(config.theme(self.shared.transparent));
-            self.style_bar();
+            self.style_tabs();
         }
+        if old.tab_bar && !config.tab_bar {
+            self.collapse_tabs();
+        }
+        self.style_bar();
         for tab in self.tabs.borrow().iter() {
             for block in tab.blocks() {
                 block.apply(&config);
@@ -577,6 +725,13 @@ impl Workspace {
 
 /// Opens the first tab and the add/settings buttons.
 pub fn start(workspace: &Rc<Workspace>, add: &Button, settings: &Button) -> Result<()> {
+    // The bar's commands are quiet icons: same size, no frame until hovered.
+    for button in [add, settings] {
+        button.set_skin(Some(chrome::quiet));
+        button.set_width(26.0);
+        button.set_height(24.0);
+        button.set_font_size(14.0);
+    }
     let ws = workspace.clone();
     add.on_click(move |_| ws.run(Action::NewTab));
     let ws = workspace.clone();

@@ -15,6 +15,8 @@ use crate::{config::Config, keys::Action, menu::MenuCommand};
 pub enum Msg {
     /// New output for terminal block `id`.
     Wake(u64),
+    /// Block `id` took keyboard focus.
+    Focus(u64),
     /// The shell of terminal block `id` exited.
     Exit(u64),
     /// An application shortcut matched in `on_key`.

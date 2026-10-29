@@ -26,6 +26,7 @@ ScrollView {
     Separator {}
     Text { text: "Theme" }
     Dropdown { id: theme; items: ["Dark", "Light"] }
+    Switch { id: tab_bar; text: "Show tab bar"; checked: true }
     Text { id: opacity_label; text: "Window opacity" }
     Slider { id: opacity; min: 0.3; max: 1; value: 1; step: 0.05 }
     Row {

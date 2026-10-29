@@ -24,6 +24,9 @@ pub struct Config {
     pub padding: f32,
     pub cursor: CursorShape,
     pub scrollback: usize,
+    /// Whether the tab bar is shown; when off, the workspace holds a single
+    /// tab and new tabs are disabled.
+    pub tab_bar: bool,
     /// Empty: `$SHELL`.
     pub shell: String,
 }
@@ -39,6 +42,7 @@ impl Default for Config {
             padding: 6.0,
             cursor: CursorShape::Block,
             scrollback: 10_000,
+            tab_bar: true,
             shell: String::new(),
         }
     }
@@ -145,6 +149,13 @@ impl Config {
                         .parse()
                         .map_or(config.scrollback, |v: usize| v.min(1_000_000))
                 }
+                "tab_bar" => {
+                    config.tab_bar = match value {
+                        "true" | "1" | "yes" | "on" => true,
+                        "false" | "0" | "no" | "off" => false,
+                        _ => config.tab_bar,
+                    }
+                }
                 "shell" => config.shell = value.into(),
                 _ => {}
             }
@@ -165,13 +176,14 @@ impl Config {
             CursorShape::Underline => "underline",
         };
         let text = format!(
-            "# Axo Terminal settings\nfont_family = {}\nfont_size = {}\nline_height = {}\ntheme = {theme}\nopacity = {}\npadding = {}\ncursor = {cursor}\nscrollback = {}\nshell = {}\n",
+            "# Axo Terminal settings\nfont_family = {}\nfont_size = {}\nline_height = {}\ntheme = {theme}\nopacity = {}\npadding = {}\ncursor = {cursor}\nscrollback = {}\ntab_bar = {}\nshell = {}\n",
             self.font_family,
             self.font_size,
             self.line_height,
             self.opacity,
             self.padding,
             self.scrollback,
+            self.tab_bar,
             self.shell,
         );
         fs::write(&path, text)?;
@@ -223,10 +235,26 @@ impl Config {
         }
     }
 
-    /// The tab bar's tint: a faint foreground wash over the window background,
-    /// so it follows the window's opacity.
-    pub fn bar_color(&self) -> Color {
+    /// The tab bar's fill: the window background pushed a shade darker, so the
+    /// chrome reads as a strip above the terminal in both themes and keeps the
+    /// window's opacity.
+    pub fn bar_color(&self, transparent: bool) -> Color {
+        let [r, g, b] = self.palette().background;
+        let shade = match self.theme {
+            ThemeName::Dark => 0.70,
+            ThemeName::Light => 0.92,
+        };
+        let channel = |value: u8| (f32::from(value) * shade).round() as u8;
+        let alpha = match transparent {
+            true => (self.opacity * 255.0).round() as u8,
+            false => 255,
+        };
+        Color::rgba(channel(r), channel(g), channel(b), alpha)
+    }
+
+    /// The active tab's fill: a faint foreground wash over the bar.
+    pub fn tab_fill(&self) -> Color {
         let [r, g, b] = self.palette().foreground;
-        Color::rgba(r, g, b, 14)
+        Color::rgba(r, g, b, 18)
     }
 }

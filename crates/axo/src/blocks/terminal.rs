@@ -6,7 +6,7 @@
 
 use std::{
     cell::{OnceCell, RefCell},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -142,6 +142,7 @@ impl Terminal {
         canvas.set_min_width(0.0);
         canvas.set_min_height(0.0);
         canvas.set_cursor(Some(Cursor::Text));
+        canvas.set_skin(Some(crate::chrome::canvas));
         canvas.set_accessible_label("Terminal");
         let input = Rc::downgrade(&inner);
         canvas.set_input(move |canvas, event| {
@@ -229,17 +230,16 @@ impl Terminal {
         self.canvas().invalidate();
     }
 
-    /// Handles a reader wakeup; returns the new title when it changed.
-    ///
-    /// The paint is deferred to the next presented frame instead of running
-    /// once per PTY chunk, so a flood costs at most one render per frame.
-    pub fn wake(&self) -> Option<String> {
+    /// Handles a reader wakeup. The paint is deferred to the next presented
+    /// frame instead of running once per PTY chunk, so a flood costs at most
+    /// one render per frame.
+    pub fn wake(&self) {
         let title = {
             let mut term = self.inner.session.term();
             term.take_title().map(str::to_owned)
         };
-        if let Some(title) = &title {
-            self.inner.state.borrow_mut().title.clone_from(title);
+        if let Some(title) = title {
+            self.inner.state.borrow_mut().title = title;
         }
         let schedule = {
             let mut state = self.inner.state.borrow_mut();
@@ -249,7 +249,6 @@ impl Terminal {
         if schedule {
             self.schedule_frame();
         }
-        title
     }
 
     /// Registers a one-shot frame callback, which runs once the compositor
@@ -288,6 +287,23 @@ impl Terminal {
 impl Inner {
     fn canvas(&self) -> &Canvas {
         self.canvas.get().expect("set at creation")
+    }
+
+    /// A title for a program that set none: the running command and the
+    /// directory it runs in, so tabs and the window stay informative.
+    fn context_title(&self) -> String {
+        let dir = self.session.cwd().as_deref().map(display_path);
+        let command = self
+            .session
+            .foreground()
+            .filter(|(_, shell)| !shell)
+            .map(|(name, _)| name);
+        match (command, dir) {
+            (Some(command), Some(dir)) => format!("{command} — {dir}"),
+            (Some(command), None) => command,
+            (None, Some(dir)) => dir,
+            (None, None) => "Terminal".into(),
+        }
     }
 
     fn menu(&self) -> &BlockMenu {
@@ -584,8 +600,11 @@ impl Inner {
             }
             CanvasEvent::Focus(focused) => {
                 self.state.borrow_mut().focused = focused;
-                if focused {
+                if focused && self.shared.focused.get() != self.id {
                     self.shared.focused.set(self.id);
+                    if let Some(proxy) = self.shared.proxy.get() {
+                        let _ = proxy.send(Msg::Focus(self.id));
+                    }
                 }
                 if self.session.term().modes.focus_events {
                     self.session.write(if focused {
@@ -624,9 +643,10 @@ impl Block for Terminal {
         self.canvas().focus();
     }
     fn title(&self) -> String {
-        match self.inner.state.borrow().title.as_str() {
-            "" => "Terminal".into(),
-            title => title.into(),
+        let title = self.inner.state.borrow().title.clone();
+        match title.is_empty() {
+            true => self.inner.context_title(),
+            false => title,
         }
     }
     fn apply(&self, config: &Config) {
@@ -644,4 +664,17 @@ impl Block for Terminal {
     fn as_terminal(&self) -> Option<&Terminal> {
         Some(self)
     }
+}
+
+/// `path` with the home directory abbreviated to `~`.
+fn display_path(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return match rest.as_os_str().is_empty() {
+            true => "~".into(),
+            false => format!("~/{}", rest.display()),
+        };
+    }
+    path.display().to_string()
 }
