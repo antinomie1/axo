@@ -1,0 +1,60 @@
+// The settings block. Values are filled from the configuration in Rust;
+// every change applies immediately, Save writes it to axo.conf.
+ScrollView {
+    padding: 20dp
+    gap: 10dp
+    Text { text: "Settings"; font_size: 20dp }
+
+    Text { text: "Font family" }
+    TextField { id: font_family; text: "monospace"; tooltip: "CSS-style family list, monospace is appended" }
+    Row {
+        gap: 12dp
+        Column {
+            grow: 1
+            gap: 4dp
+            Text { text: "Font size" }
+            NumberField { id: font_size; min: 4; max: 96; value: 14; step: 0.5; decimals: 1 }
+        }
+        Column {
+            grow: 1
+            gap: 4dp
+            Text { text: "Line height" }
+            NumberField { id: line_height; min: 0.5; max: 3; value: 1; step: 0.05; decimals: 2 }
+        }
+    }
+
+    Separator {}
+    Text { text: "Theme" }
+    Dropdown { id: theme; items: ["Dark", "Light"] }
+    Text { id: opacity_label; text: "Window opacity" }
+    Slider { id: opacity; min: 0.3; max: 1; value: 1; step: 0.05 }
+    Row {
+        gap: 12dp
+        Column {
+            grow: 1
+            gap: 4dp
+            Text { text: "Padding" }
+            NumberField { id: padding; min: 0; max: 64; value: 6; step: 1; decimals: 0 }
+        }
+        Column {
+            grow: 1
+            gap: 4dp
+            Text { text: "Cursor" }
+            Dropdown { id: cursor; items: ["Block", "Bar", "Underline"] }
+        }
+    }
+
+    Separator {}
+    Text { text: "Scrollback lines" }
+    NumberField { id: scrollback; min: 0; max: 1000000; value: 10000; step: 1000; decimals: 0 }
+    Text { text: "Shell (empty: $SHELL; applies to new terminals)" }
+    TextField { id: shell; text: "" }
+
+    Row {
+        gap: 8dp
+        margin: [8dp, 0dp, 0dp, 0dp]
+        Button { id: save; text: "Save" }
+        Button { id: defaults; text: "Defaults" }
+    }
+    Text { id: status; text: "" }
+}

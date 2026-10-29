@@ -1,0 +1,16 @@
+[package]
+name = "axo"
+description = "Axo Terminal: a Vulkan-accelerated terminal built on aegle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "axo"
+path = "src/main.rs"
+
+[dependencies]
+axo-term.workspace = true
+axo-render.workspace = true
+aegle.workspace = true

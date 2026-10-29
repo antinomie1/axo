@@ -1,0 +1,12 @@
+[package]
+name = "axo-term"
+description = "Axo terminal core: PTY, VT parsing, grid, scrollback and selection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+vte = { version = "0.15", default-features = false }
+libc = "0.2"
+unicode-width = "0.2"

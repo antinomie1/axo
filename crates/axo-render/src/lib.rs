@@ -1,0 +1,113 @@
+//! Terminal renderers behind one [`Renderer`] trait.
+//!
+//! A terminal block owns a surface of a renderer and asks it to draw the
+//! terminal into it, then paints the surface into its aegle scene. Callers only
+//! see the trait, so another backend (wgpu, CPU) plugs in without API changes.
+//! Shared, backend-neutral pieces live here: glyph rasterization through the
+//! aegle text stack ([`glyphs`]) and the cell-to-quad layout ([`quads`]).
+
+mod boxdraw;
+pub mod glyphs;
+pub mod quads;
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
+
+use aegle::ui::scene::{Rect, SceneBuilder};
+pub use axo_term::CursorShape;
+use axo_term::{Color, Term};
+
+pub type Error = Box<dyn std::error::Error>;
+pub type Result<T = ()> = std::result::Result<T, Error>;
+
+/// An sRGB color.
+pub type Rgb = [u8; 3];
+
+/// Colors that resolve terminal cell colors.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Palette {
+    pub foreground: Rgb,
+    pub background: Rgb,
+    pub cursor: Rgb,
+    pub selection: Rgb,
+    /// The 16 ANSI colors; 16–255 are the standard cube and gray ramp.
+    pub ansi: [Rgb; 16],
+}
+
+impl Palette {
+    /// The color of index `i` in the 256-color table.
+    pub fn indexed(&self, i: u8) -> Rgb {
+        match i {
+            0..=15 => self.ansi[i as usize],
+            16..=231 => {
+                let i = i - 16;
+                let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                [level(i / 36), level(i / 6 % 6), level(i % 6)]
+            }
+            _ => [8 + (i - 232) * 10; 3],
+        }
+    }
+
+    /// A cell color; `None` is the default background, left transparent.
+    #[inline]
+    pub fn resolve(&self, color: Color, foreground: bool) -> Option<Rgb> {
+        match color {
+            Color::Default if foreground => Some(self.foreground),
+            Color::Default => None,
+            Color::Indexed(i) => Some(self.indexed(i)),
+            Color::Rgb(r, g, b) => Some([r, g, b]),
+        }
+    }
+}
+
+/// The terminal font.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontSpec {
+    /// A family name list as for CSS, such as `"JetBrains Mono, monospace"`.
+    pub family: String,
+    /// Size in logical pixels.
+    pub size: f32,
+    /// Line height as a multiple of the font's natural line height.
+    pub line_height: f32,
+}
+
+/// Cell size and baseline in device pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CellSize {
+    pub width: u32,
+    pub height: u32,
+    /// Baseline distance from the cell top.
+    pub baseline: i32,
+}
+
+/// Everything a renderer reads to draw one terminal.
+pub struct Frame<'a> {
+    pub term: &'a Term,
+    pub palette: &'a Palette,
+    /// The configured cursor; the application can override it (DECSCUSR).
+    pub cursor: CursorShape,
+    /// Unfocused terminals show a hollow cursor.
+    pub focused: bool,
+    /// Inner padding in device pixels.
+    pub padding: u32,
+}
+
+/// A renderer's handle for one terminal's drawing target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SurfaceId(pub u32);
+
+/// A terminal renderer. All calls happen on the UI thread.
+pub trait Renderer {
+    /// Selects the font at `scale` device pixels per logical pixel and returns
+    /// the resulting cell size. Every surface redraws with it.
+    fn set_font(&mut self, font: &FontSpec, scale: f32) -> Result<CellSize>;
+    /// The current cell size.
+    fn cell_size(&self) -> CellSize;
+    fn create_surface(&mut self) -> Result<SurfaceId>;
+    /// Releases a surface; its id is invalid afterwards.
+    fn destroy_surface(&mut self, surface: SurfaceId);
+    /// Draws `frame` into `surface` at `size` device pixels.
+    fn render(&mut self, surface: SurfaceId, size: [u32; 2], frame: &Frame<'_>) -> Result;
+    /// Records the surface's latest image into an aegle scene over `rect`
+    /// (logical coordinates). Called from a canvas painter.
+    fn paint(&self, surface: SurfaceId, builder: &mut SceneBuilder, rect: Rect);
+}

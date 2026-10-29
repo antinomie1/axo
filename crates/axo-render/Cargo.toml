@@ -1,0 +1,20 @@
+[package]
+name = "axo-render"
+description = "Axo terminal renderers behind one Renderer trait; Vulkan via ash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["vulkan"]
+vulkan = []
+
+[dependencies]
+axo-term.workspace = true
+aegle.workspace = true
+aegle-glyph.workspace = true
+aegle-text.workspace = true
+
+[build-dependencies]
+naga = { version = "30.0.1", default-features = false, features = ["wgsl-in", "spv-out"] }

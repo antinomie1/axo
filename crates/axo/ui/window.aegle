@@ -1,0 +1,19 @@
+// The window chrome: the tab bar on top, the selected tab's page below.
+Window {
+    title: "Axo"
+    width: 1000dp
+    height: 640dp
+    padding: 0dp
+    gap: 0dp
+    Row {
+        id: bar
+        height: 34dp
+        padding: [2dp, 6dp]
+        gap: 4dp
+        align: center
+        Row { id: tabs; gap: 4dp; grow: 1; basis: 0dp; align: center }
+        Button { id: add; text: "+"; tooltip: "New tab (Ctrl+Shift+T)" }
+        Button { id: settings; text: "Settings"; tooltip: "Settings (Ctrl+,)" }
+    }
+    Column { id: pages; grow: 1; basis: 0dp; gap: 0dp }
+}
