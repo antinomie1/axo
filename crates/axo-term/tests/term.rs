@@ -182,3 +182,24 @@ fn ascii_fast_path_matches_general_path() {
     assert_eq!(row.cells[0].fg, Color::Indexed(196));
     assert_eq!(row.cells[1].fg, Color::Default);
 }
+
+#[test]
+fn osc_7_reports_the_shell_directory() {
+    let mut term = Term::new(20, 2, 10);
+    assert_eq!(term.cwd(), None);
+    // xterm and most shells escape spaces as `%20`; the host is optional.
+    term.advance(b"\x1b]7;file://host/home/me/my%20dir\x07");
+    assert_eq!(term.cwd(), Some("/home/me/my dir"));
+    // A later report replaces it, so tabs follow the shell.
+    term.advance(b"\x1b]7;file://localhost/tmp\x1b\\");
+    assert_eq!(term.cwd(), Some("/tmp"));
+    // Windows shells send a drive through the same URI, with a leading slash.
+    term.advance(b"\x1b]7;file:///C:/Users/me\x07");
+    assert_eq!(term.cwd(), Some("C:/Users/me"));
+    // The host names the machine the shell runs on, which is this one, so only
+    // the path matters; another scheme is not a directory report at all.
+    term.advance(b"\x1b]7;file://other/tmp\x07");
+    assert_eq!(term.cwd(), Some("/tmp"));
+    term.advance(b"\x1b]7;https://example.com/tmp\x07");
+    assert_eq!(term.cwd(), Some("/tmp"));
+}

@@ -1,8 +1,9 @@
 //! Backend-neutral layout of a terminal frame into colored and textured quads.
 
 use axo_term::{CursorShape, Flags};
+use unicode_width::UnicodeWidthChar;
 
-use crate::{CellSize, Frame, Rgb, glyphs::GlyphKey};
+use crate::{CellSize, Frame, Preedit, Rgb, glyphs::GlyphKey};
 
 pub const SOLID: u32 = 0;
 pub const MASK: u32 = 1;
@@ -64,6 +65,60 @@ fn solid(x: f32, y: f32, w: f32, h: f32, rgb: Rgb) -> Quad {
     }
 }
 
+/// Composition text laid over the cursor's row, one entry per column.
+struct Overlay {
+    /// The column the text starts at.
+    start: usize,
+    /// The character drawn in a column, or `None` for the trailing column of a
+    /// double-width one.
+    columns: Vec<Option<char>>,
+    /// The column of the composition caret, relative to the row.
+    caret: usize,
+}
+
+impl Overlay {
+    fn new(preedit: &Preedit<'_>, start: usize, cols: usize) -> Self {
+        let mut columns = Vec::new();
+        let mut caret = None;
+        for (offset, ch) in preedit.text.char_indices() {
+            if Some(offset) == preedit.cursor.map(|(_, focus)| focus) {
+                caret = Some(columns.len());
+            }
+            columns.push(Some(ch));
+            for _ in 1..width(ch) {
+                columns.push(None);
+            }
+        }
+        // A caret past the last character follows it, as an input method's does.
+        let caret = caret.unwrap_or(columns.len());
+        columns.truncate(cols.saturating_sub(start));
+        Self {
+            start,
+            caret,
+            columns,
+        }
+    }
+
+    /// The entry for column `x`, when the composition covers it.
+    fn at(&self, x: usize) -> Option<Option<char>> {
+        let index = x.checked_sub(self.start)?;
+        self.columns.get(index).copied()
+    }
+
+    /// Cells the caret character covers, so a block cursor covers both halves.
+    fn caret_span(&self) -> usize {
+        match self.columns.get(self.caret) {
+            Some(Some(ch)) => width(*ch),
+            _ => 1,
+        }
+    }
+}
+
+/// Columns a character occupies in the grid.
+fn width(ch: char) -> usize {
+    ch.width().unwrap_or(1).clamp(1, 2)
+}
+
 /// Lays out `frame`; the default background stays transparent so the window
 /// background (and its opacity) shows through.
 pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, out: &mut Quads) {
@@ -80,7 +135,23 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
     let cursor_row = term.cursor.y + term.display_offset();
     let cursor =
         (term.modes.show_cursor && cursor_row < rows).then_some((term.cursor.x, cursor_row));
+    // Uncommitted composition hides the cells it covers and moves the caret
+    // into itself, which is where the candidate window points.
+    let overlay = frame
+        .preedit
+        .filter(|preedit| !preedit.text.is_empty())
+        .map(|preedit| Overlay::new(&preedit, term.cursor.x, cols));
+    let cursor = match (&overlay, cursor) {
+        (Some(overlay), _) => {
+            (term.modes.show_cursor && cursor_row < rows && !overlay.columns.is_empty()).then_some((
+                (overlay.start + overlay.caret).min(cols.saturating_sub(1)),
+                cursor_row,
+            ))
+        }
+        (None, cursor) => cursor,
+    };
     let block = frame.focused && shape == CursorShape::Block;
+    let cursor_span = overlay.as_ref().map_or(1, Overlay::caret_span);
     let line_width = (ch / 16.0).round().max(1.0);
 
     for y in 0..rows {
@@ -101,6 +172,16 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
         };
         for x in 0..cols {
             let c = row.cells.get(x).copied().unwrap_or_default();
+            // A composition column keeps the cell's colors and hides its
+            // character; `None` is the trailing half of a wide one.
+            let composing = overlay
+                .as_ref()
+                .and_then(|overlay| (y == cursor_row).then(|| overlay.at(x)).flatten());
+            let (text, wide) = match composing {
+                Some(Some(text)) => (Some(text), width(text) == 2),
+                Some(None) => (None, false),
+                None => (Some(c.ch), c.flags.has(Flags::WIDE)),
+            };
             let mut fg = palette.resolve(c.fg, true).unwrap();
             let mut bg = palette.resolve(c.bg, false);
             if c.flags.has(Flags::INVERSE) {
@@ -116,7 +197,9 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             if c.flags.has(Flags::DIM) && !selected {
                 fg = palette.dim(fg);
             }
-            if block && cursor == Some((x, y)) {
+            let under_cursor = block
+                && cursor.is_some_and(|(cx, cy)| cy == y && x >= cx && x - cx < cursor_span);
+            if under_cursor {
                 bg = Some(palette.cursor);
                 if let Some(text) = palette.cursor_text {
                     fg = text;
@@ -127,9 +210,14 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
                 run = bg.map(|rgb| (x, rgb));
             }
             let left = pad + x as f32 * cw;
-            if c.ch != ' ' && !c.flags.has(Flags::SPACER) && !c.flags.has(Flags::HIDDEN) {
+            let drawn = match composing {
+                Some(_) => text,
+                None if !c.flags.has(Flags::SPACER) && !c.flags.has(Flags::HIDDEN) => text,
+                None => None,
+            };
+            if let Some(ch) = drawn.filter(|ch| *ch != ' ') {
                 let key = GlyphKey {
-                    ch: c.ch,
+                    ch,
                     bold: c.flags.has(Flags::BOLD),
                     italic: c.flags.has(Flags::ITALIC),
                 };
@@ -147,8 +235,9 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
                     });
                 }
             }
-            let span = if c.flags.has(Flags::WIDE) { 2.0 } else { 1.0 };
-            if c.flags.has(Flags::UNDERLINE) {
+            let span = if wide { 2.0 } else { 1.0 };
+            // Composition is underlined until the input method commits it.
+            if c.flags.has(Flags::UNDERLINE) || matches!(composing, Some(Some(_))) {
                 let y = top + (cell.baseline as f32 + line_width).min(ch - line_width);
                 out.foreground
                     .push(solid(left, y, cw * span, line_width, fg));
@@ -164,12 +253,8 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
 
     // Non-block cursors draw over the glyphs.
     if let Some((x, y)) = cursor.filter(|_| !block) {
-        let wide = grid
-            .line(term.view_line(y))
-            .and_then(|row| row.cells.get(x))
-            .is_some_and(|c| c.flags.has(Flags::WIDE));
         let (left, top) = (pad + x as f32 * cw, pad + y as f32 * ch);
-        let w = if wide { cw * 2.0 } else { cw };
+        let w = cw * cursor_span as f32;
         let t = (cw / 8.0).round().max(1.0);
         let color = palette.cursor;
         match (frame.focused, shape) {

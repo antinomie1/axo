@@ -186,6 +186,7 @@ fn the_block_cursor_uses_its_own_text_color() {
         cursor: CursorShape::Block,
         focused: true,
         padding: 0,
+        preedit: None,
     };
     let colors = glyph_colors(&frame);
     assert_eq!(colors, vec![[0x11, 0x11, 0x11, 255]]);
@@ -206,6 +207,7 @@ fn selection_text_color_overrides_the_cell() {
         cursor: CursorShape::Bar,
         focused: false,
         padding: 0,
+        preedit: None,
     };
     let mut out = quads::Quads::default();
     quads::build(

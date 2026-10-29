@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    pty::{Pty, WinSize, foreground, hang_up},
+    pty::{Console, Pty, WinSize, process_cwd, process_name},
     term::Term,
 };
 
@@ -40,7 +40,9 @@ pub struct Session {
     term: Arc<Mutex<Term>>,
     dirty: Arc<AtomicBool>,
     input: mpsc::Sender<Vec<u8>>,
-    master: std::fs::File,
+    /// The pseudo-terminal's own side: sizing, the foreground group and
+    /// hanging up. The child and its pipes live in the threads below.
+    console: Console,
     pid: u32,
 }
 
@@ -50,8 +52,13 @@ impl Session {
         size: WinSize,
         notify: impl Fn(Event) + Send + 'static,
     ) -> io::Result<Self> {
-        let pty = Pty::spawn(options.shell, options.cwd, size)?;
-        let pid = pty.child.id();
+        let Pty {
+            mut reader,
+            mut writer,
+            mut child,
+            console,
+        } = Pty::spawn(options.shell, options.cwd, size)?;
+        let pid = child.id();
         let term = Arc::new(Mutex::new(Term::new(
             size.cols as usize,
             size.rows as usize,
@@ -60,7 +67,6 @@ impl Session {
         let dirty = Arc::new(AtomicBool::new(false));
         let (input, queue) = mpsc::channel::<Vec<u8>>();
 
-        let mut writer = pty.master.try_clone()?;
         thread::Builder::new()
             .name("axo-pty-write".into())
             .stack_size(64 * 1024)
@@ -72,8 +78,6 @@ impl Session {
                 }
             })?;
 
-        let mut reader = pty.master.try_clone()?;
-        let mut child = pty.child;
         let (shared, flag, responses) = (term.clone(), dirty.clone(), input.clone());
         thread::Builder::new()
             .name("axo-pty-read".into())
@@ -100,7 +104,7 @@ impl Session {
                         notify(Event::Wakeup);
                     }
                 }
-                let _ = child.wait();
+                child.wait();
                 notify(Event::Exit);
             })?;
 
@@ -108,7 +112,7 @@ impl Session {
             term,
             dirty,
             input,
-            master: pty.master,
+            console,
             pid,
         })
     }
@@ -129,26 +133,30 @@ impl Session {
 
     pub fn resize(&self, size: WinSize) {
         self.term().resize(size.cols as usize, size.rows as usize);
-        let _ = Pty::resize(&self.master, size);
+        let _ = self.console.resize(size);
     }
 
     /// The shell's working directory, for opening new terminals next to it.
+    /// The shell's own report (OSC 7) wins over asking the platform, because a
+    /// shell may sit anywhere while its process keeps the directory it started
+    /// in.
     pub fn cwd(&self) -> Option<PathBuf> {
-        std::fs::read_link(format!("/proc/{}/cwd", self.pid)).ok()
+        let reported = self.term().cwd().map(PathBuf::from);
+        reported.or_else(|| process_cwd(self.pid))
     }
 
     /// The command in the foreground, and whether it is the shell itself
-    /// (idle at its prompt); read from `/proc`, so it is cheap but not free.
+    /// (idle at its prompt). Only Unix can answer; elsewhere the title falls
+    /// back to the child's own title or directory.
     pub fn foreground(&self) -> Option<(String, bool)> {
-        let pgrp = foreground(&self.master)?;
-        let name = std::fs::read_to_string(format!("/proc/{pgrp}/comm")).ok()?;
-        let name = name.trim_end();
-        (!name.is_empty()).then(|| (name.to_owned(), pgrp == self.pid))
+        let pgrp = self.console.foreground()?;
+        let name = process_name(pgrp)?;
+        Some((name, pgrp == self.pid))
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        hang_up(self.pid);
+        self.console.hang_up(self.pid);
     }
 }

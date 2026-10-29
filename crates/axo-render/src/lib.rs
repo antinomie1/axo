@@ -11,7 +11,9 @@ mod boxdraw;
 pub mod glyphs;
 pub mod palette;
 pub mod quads;
-#[cfg(feature = "vulkan")]
+// Vulkan is the GPU path on Linux and Windows; macOS has no ash backend in
+// aegle yet, so only these targets compile the renderer.
+#[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows")))]
 pub mod vulkan;
 
 use aegle::ui::scene::{Rect, SceneBuilder};
@@ -46,6 +48,15 @@ pub struct CellSize {
     pub baseline: i32,
 }
 
+/// Input-method composition the child has not received yet, in UTF-8 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Preedit<'a> {
+    /// Temporary text, drawn at the cursor in place of the cells it covers.
+    pub text: &'a str,
+    /// Fixed and active caret endpoints within `text`; `None` hides the caret.
+    pub cursor: Option<(usize, usize)>,
+}
+
 /// Everything a renderer reads to draw one terminal.
 pub struct Frame<'a> {
     pub term: &'a Term,
@@ -56,6 +67,8 @@ pub struct Frame<'a> {
     pub focused: bool,
     /// Inner padding in device pixels.
     pub padding: u32,
+    /// Composition shown at the cursor; the terminal receives it only on commit.
+    pub preedit: Option<Preedit<'a>>,
 }
 
 /// A renderer's handle for one terminal's drawing target.

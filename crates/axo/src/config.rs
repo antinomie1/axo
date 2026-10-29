@@ -1,4 +1,5 @@
-//! User settings in `$XDG_CONFIG_HOME/axo/axo.conf`: `key = value` lines.
+//! User settings in the platform's config directory (`$XDG_CONFIG_HOME/axo` on
+//! Unix, `%APPDATA%\axo` on Windows) as `key = value` lines.
 
 use std::{fs, io, path::PathBuf};
 
@@ -12,6 +13,19 @@ use axo_render::{
 /// shortcuts and Ctrl+wheel zoom.
 pub const MIN_FONT_SIZE: f32 = 4.0;
 pub const MAX_FONT_SIZE: f32 = 96.0;
+
+/// The shell used when the settings name none: the login shell on Unix, the
+/// command processor on Windows.
+fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+    }
+    #[cfg(unix)]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -33,7 +47,7 @@ pub struct Config {
     /// Whether the tab bar is shown; when off, the workspace holds a single
     /// tab and new tabs are disabled.
     pub tab_bar: bool,
-    /// Empty: `$SHELL`.
+    /// Empty: the platform's default shell (`$SHELL`, or `%COMSPEC%`).
     pub shell: String,
 }
 
@@ -55,15 +69,30 @@ impl Default for Config {
     }
 }
 
-/// The Axo configuration directory: `$XDG_CONFIG_HOME/axo`.
-fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
+/// The user's home directory, which `~` abbreviates and expands to.
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|base| base.join("axo"))
 }
 
-/// Where custom color schemes live: `$XDG_CONFIG_HOME/axo/themes`.
+/// The Axo configuration directory: `$XDG_CONFIG_HOME/axo` on Unix,
+/// `%APPDATA%\axo` on Windows, where roaming settings belong.
+fn config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("axo"))
+    }
+    #[cfg(unix)]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|home| home.join(".config")))
+            .map(|base| base.join("axo"))
+    }
+}
+
+/// Where custom color schemes live: `themes` inside the configuration directory.
 pub fn theme_dir() -> Option<PathBuf> {
     Some(config_dir()?.join("themes"))
 }
@@ -102,10 +131,10 @@ pub fn scheme_names() -> Vec<String> {
     names
 }
 
-/// `~/…` paths are relative to `$HOME`.
+/// `~/…` paths are relative to the home directory.
 fn expand_home(path: &str) -> PathBuf {
-    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+    match (path.strip_prefix("~/"), home()) {
+        (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(path),
     }
 }
@@ -198,7 +227,7 @@ impl Config {
     }
 
     pub fn save(&self) -> io::Result<PathBuf> {
-        let path = path().ok_or_else(|| io::Error::other("no HOME or XDG_CONFIG_HOME"))?;
+        let path = path().ok_or_else(|| io::Error::other("no configuration directory"))?;
         fs::create_dir_all(path.parent().unwrap())?;
         let cursor = match self.cursor {
             CursorShape::Block => "block",
@@ -277,7 +306,7 @@ impl Config {
 
     pub fn shell(&self) -> String {
         match self.shell.trim() {
-            "" => std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+            "" => default_shell(),
             shell => shell.into(),
         }
     }

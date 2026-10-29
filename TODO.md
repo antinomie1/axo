@@ -25,7 +25,7 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 
 | crate | 职责 | 依赖 |
 | --- | --- | --- |
-| `axo-term` | PTY（openpty/fork）、VT 解析（vte）、网格/回滚、选择、键盘与鼠标编码 | `vte`、`libc`、`unicode-width` |
+| `axo-term` | PTY（Unix: openpty/fork；Windows: ConPTY）、VT 解析（vte）、网格/回滚、选择、键盘与鼠标编码 | `vte`、`unicode-width`、`libc`(unix)、`windows-sys`(windows) |
 | `axo-render` | `Renderer` trait、字形与框线栅格化（aegle-text + aegle-glyph）、`vulkan` 实现（ash，WGSL→SPIR-V 构建期由 naga 编译） | aegle |
 | `axo` (bin) | 配置、标签页、分屏布局、块（终端/设置）、快捷键、标记 UI | 上两者 + aegle |
 
@@ -34,7 +34,17 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] `Window::scale()`：HiDPI 下终端纹理按物理像素渲染，避免模糊。
 - [x] `Node::request_paste()` + `CanvasEvent::Paste(String)`：Canvas（终端）可读取剪贴板。
 - [x] Pango 字体文件缓存按文件路径共享 `Blob`（避免 `.ttc` 字体集按 face 重复读入内存）。
+- [x] Win32 消息循环把按键先交给 TSF（`ITfKeystrokeMgr::TestKeyDown/KeyDown`，在 `TranslateMessage` 之前）：被输入法吃掉的键不再变成 `WM_CHAR` 文本，否则 Windows 上的输入法收不到按键。
+- [x] `Control::ime_caret` + `Node::request_ime_sync` + `Canvas::set_ime` / `CanvasEvent::Ime` / `CanvasEvent::ImeCancelled`：Canvas 也能作为原生输入法合成目标（无 surrounding text，只发布光标矩形），一次 `Done` 仍是一个原子事务。
 - [x] 单行编辑框不再把自身文本当作可纵向滚动内容：`scroll_limit` 对单行返回 0，caret 显露不再挪动 `scroll.y`，滚轮经过内嵌输入框时滚动外层视图（多行编辑区仍滚自己的文字）；单行文字在控件内垂直居中，基线、指针映射与 IME 原点随之调整。
+
+## 输入法
+
+终端没有文档，所以 IME 的语义和文本框不同：
+
+1. 只有聚焦块发布 `ImeRequest`，`surrounding` 为 `None`（`axo-term` 不把网格当成可编辑文档，输入法也无从 `delete_surrounding_text` 改动 shell 提示符），`cursor_rect` 为光标单元格的逻辑像素矩形，`multiline = false`。
+2. 平台事务（`delete_*` + `commit` + `preedit`）到达 `CanvasEvent::Ime`：`preedit` 只画在本地（覆写光标处单元格、宽字符占两格、下划线、光标跟随插入点），`commit` 才 `session.write()` 进 PTY；`delete_*` 对终端无意义（字节已交给子进程），忽略。
+3. 光标移动/滚动/输出后 `sync_ime()` 比较单元格，只在变化时 `request_ime_sync()`，空闲不产生任何平台往返；焦点离开（`CanvasEvent::ImeCancelled`）直接丢弃预编辑。
 
 ## 里程碑
 
@@ -77,8 +87,15 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] 空闲 CPU 为 0（10s 空闲 0 CPU tick，无逐帧回调）
 - [x] 与 Alacritty 0.17 同条件对比（DSR 同步吞吐）：ASCII 157.8 vs 140.8 MiB/s、SGR 168.8 vs 193.4、CJK 160.5 vs 163.5、备用屏 TUI 163.4 vs 162.2 MiB/s；启动 64 vs 114 ms
 
+## 平台支持
+
+- [x] Linux（Wayland）：`aegle-platform-wayland`，Vulkan/ash 渲染，`text-input-v3` 输入法。
+- [x] Windows：`aegle-platform-win32`（Win32 窗口 + TSF 输入法），ConPTY（`CreatePseudoConsole` + `CreateProcessW`，需 Windows 10 1809+），Vulkan/ash 渲染；前台进程名与 `/proc` 相关工作目录在 Windows 上分别退化为“无”和 OSC 7。
+- [x] macOS：`aegle-platform-macos`（AppKit + `NSTextInputClient`）与 `openpty` PTY 均可编译，共享同一套 IME 与渲染器接口。
+- [ ] macOS 渲染器：aegle 在 macOS 上没有 GPU 后端（`vulkan` 无 ash，`wgpu`/Metal 未接入），`axo` 在 macOS 上暂不打开窗口。
+
 ## 后续（未做）
-- [ ] 终端内输入法（IME）预编辑：需要 aegle Canvas 接入 IME 事务
+- [ ] macOS 渲染器接入（wgpu/Metal 或 CPU 后备），随后才能实机验证 macOS 输入法
 - [ ] 回滚的重排（resize reflow）；当前 resize 截断/填充并保留光标行
 - [ ] 连字（ligatures）、Kitty 键盘协议、图像协议（sixel/kitty）
 - [ ] 其他渲染器实现（wgpu / CPU）——`axo_render::Renderer` 接口已就绪

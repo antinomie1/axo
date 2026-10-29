@@ -12,9 +12,19 @@ vulkan = []
 
 [dependencies]
 axo-term.workspace = true
+unicode-width = "0.2"
 aegle.workspace = true
 aegle-glyph.workspace = true
 aegle-text.workspace = true
 
 [build-dependencies]
 naga = { version = "30.0.1", default-features = false, features = ["wgsl-in", "spv-out"] }
+
+# The renderer aegle itself presents with, and therefore the one the terminal
+# draws into. Only the target's row applies, so no other platform's backend is
+# compiled in.
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+aegle = { workspace = true, features = ["vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+aegle = { workspace = true, features = ["tiny-skia"] }

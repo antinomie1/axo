@@ -1,7 +1,10 @@
-//! Compiles the WGSL shaders to SPIR-V at build time; no compiler ships at run time.
+//! Compiles the WGSL shaders to SPIR-V at build time; no compiler ships at run
+//! time. Only the targets with a Vulkan backend have shaders to compile.
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::{env, fs, path::PathBuf};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use naga::{
     ShaderStage,
     back::spv::{self, Options, PipelineOptions, WriterFlags},
@@ -9,6 +12,15 @@ use naga::{
 };
 
 fn main() {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    compile();
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    println!("cargo:rerun-if-changed=build.rs");
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn compile() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     let path = "shaders/terminal.wgsl";
     println!("cargo:rerun-if-changed={path}");

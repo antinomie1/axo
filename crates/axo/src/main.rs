@@ -1,4 +1,9 @@
-//! Axo Terminal: tabs of split blocks on aegle; terminals render with Vulkan.
+//! Axo Terminal: tabs of split blocks on aegle; terminals draw through the
+//! platform's GPU backend, which is Vulkan on Linux and Windows.
+//!
+//! macOS compiles the same blocks and composition path, but aegle has no GPU
+//! backend there yet, so the binary reports that instead of opening a window.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 mod blocks;
 mod chrome;
@@ -9,22 +14,41 @@ mod menu;
 mod shared;
 mod workspace;
 
+use aegle::prelude::*;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::{
     cell::{Cell, OnceCell, RefCell},
     rc::Rc,
 };
 
-use aegle::{app::VulkanOptions, prelude::*};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use aegle::app::VulkanOptions;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use axo_render::{Renderer, vulkan::VulkanRenderer};
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::{
     config::Config,
     shared::{Msg, Shared},
     workspace::Workspace,
 };
 
+/// The terminal needs a renderer: the same code runs on every platform aegle
+/// has a GPU backend for, and the missing one says so instead of guessing.
+#[cfg(target_os = "macos")]
+fn main() -> Result<()> {
+    Err("axo: no GPU renderer on macOS yet; the window, its text input and the \
+         composition path compile, but nothing can draw the terminal"
+        .into())
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn main() -> Result<()> {
     let config = Config::load();
+    // Wayland always hands out an alpha surface; elsewhere premultiplied alpha
+    // is only worth it when the window is translucent.
     let transparent = cfg!(target_os = "linux") || config.opacity < 1.0;
     let app = App::with_options(AppOptions {
         app_id: "dev.axo.Terminal".into(),

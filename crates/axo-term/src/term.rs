@@ -108,6 +108,8 @@ pub struct Term {
     pub cursor_shape: Option<CursorShape>,
     title: String,
     title_changed: bool,
+    /// The directory the shell reported with OSC 7, in UTF-8.
+    cwd: Option<String>,
     responses: Vec<u8>,
     display_offset: usize,
     selection: Option<Selection>,
@@ -115,6 +117,38 @@ pub struct Term {
     pub report_colors: [[u8; 3]; 2],
     scrollback: usize,
     parser: vte::Parser,
+}
+
+/// The local path of an OSC 7 `file://host/path` URI, percent-decoded, or
+/// `None` for another scheme. The host names the machine running the shell,
+/// which is this one, so only the path matters.
+fn parse_directory(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let mut out = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte != b'%' {
+            out.push(byte);
+            continue;
+        }
+        let hex = |byte: Option<u8>| {
+            let byte = byte?;
+            char::from(byte).to_digit(16).map(|digit| digit as u8)
+        };
+        let (high, low) = (hex(bytes.next()), hex(bytes.next()));
+        match (high, low) {
+            (Some(high), Some(low)) => out.push(high << 4 | low),
+            _ => return None,
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    // Windows URIs keep a leading slash before the drive: `/C:/Users`.
+    let path = match path.strip_prefix('/') {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => path,
+    };
+    (!path.is_empty()).then_some(path)
 }
 
 fn graphics(c: char) -> char {
@@ -166,6 +200,7 @@ impl Term {
             cursor_shape: None,
             title: String::new(),
             title_changed: false,
+            cwd: None,
             responses: Vec::new(),
             display_offset: 0,
             selection: None,
@@ -219,6 +254,11 @@ impl Term {
     }
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The working directory the shell last reported with OSC 7, if any.
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
     }
 
     // ---- viewport ----
@@ -934,6 +974,21 @@ impl Perform for Term {
                 if title != self.title {
                     self.title = title;
                     self.title_changed = true;
+                }
+            }
+            // OSC 7: the shell reports its directory as a `file://host/path`
+            // URI, which no other source can answer for a child that changes
+            // directory (and the only source on Windows).
+            [b"7", rest @ ..] => {
+                let uri = rest
+                    .iter()
+                    .map(|part| String::from_utf8_lossy(part))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                if let Some(cwd) = parse_directory(&uri)
+                    && self.cwd.as_deref() != Some(&cwd)
+                {
+                    self.cwd = Some(cwd);
                 }
             }
             [which @ (b"10" | b"11"), b"?"] => {

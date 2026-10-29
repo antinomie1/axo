@@ -16,17 +16,19 @@ use aegle::{
         Key as UiKey, KeyEvent, Modifiers, PointerButton, Size,
         scene::{Rect, SceneBuilder},
     },
-    widgets::CanvasEvent,
+    widgets::{CanvasEvent, CanvasIme},
 };
-use axo_render::{Frame, SurfaceId};
+use axo_render::{Frame, Preedit as PreeditView, SurfaceId};
 use axo_term::{
     Key, Mods, MouseAction, MouseButton, MouseMode, Options, Point as Cell, Selection,
     SelectionKind, Session, WinSize, encode_key, encode_mouse,
 };
 
 use super::{Block, next_id};
+use unicode_width::UnicodeWidthChar;
+
 use crate::{
-    config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE},
+    config::{self, Config, MAX_FONT_SIZE, MIN_FONT_SIZE},
     keys::Action,
     menu::BlockMenu,
     shared::{Msg, SharedRef},
@@ -68,10 +70,38 @@ struct State {
     /// The right press of this batch already went to the application or
     /// opened the menu; the queued context menu request must not repeat it.
     suppress_menu: bool,
+    /// Composition the input method has not committed yet.
+    preedit: Option<Preedit>,
+    /// The cell the composition caret was last published at, so painting and
+    /// output do not resend an unchanged native IME state.
+    ime_cell: Option<(usize, usize)>,
 }
 
 /// Vertical wheel travel, in logical pixels, that makes one font-size step.
 const ZOOM_WHEEL_STEP: f32 = 10.0;
+
+/// Composition the input method has not committed, shown at the cursor.
+#[derive(Clone, Debug, Default)]
+struct Preedit {
+    text: String,
+    /// Fixed and active caret endpoints within `text`, in bytes.
+    cursor: Option<(usize, usize)>,
+}
+
+impl Preedit {
+    /// Columns between the composition start and its caret.
+    fn caret(&self) -> usize {
+        let end = self.cursor.map(|(_, focus)| focus).unwrap_or(0);
+        self.text
+            .get(..end)
+            .map_or(0, |text| text.chars().map(columns).sum())
+    }
+}
+
+/// Columns a character occupies in the cell grid.
+fn columns(ch: char) -> usize {
+    ch.width().unwrap_or(1).clamp(1, 2)
+}
 
 /// Accumulates Ctrl+wheel travel in `carry` and returns a font-size step:
 /// at most one per event, so discrete notches stay one step and continuous
@@ -172,6 +202,10 @@ impl Terminal {
                 inner.input(&canvas, event);
             }
         });
+        // A terminal has no document to compose into, so it publishes its
+        // caret alone and keeps the composition local until it is committed.
+        let caret = Rc::downgrade(&inner);
+        canvas.set_ime(move |size| caret.upgrade().and_then(|inner| inner.ime_caret(size)));
         let has_selection: Rc<dyn Fn() -> bool> = {
             let weak = Rc::downgrade(&inner);
             Rc::new(move || {
@@ -230,6 +264,7 @@ impl Terminal {
             }
         }
         self.inner.session.write(out);
+        self.inner.sync_ime();
         true
     }
 
@@ -249,7 +284,9 @@ impl Terminal {
         let mut term = self.inner.session.term();
         let rows = term.rows() as isize;
         term.scroll_display(pages * (rows - 1).max(1));
+        drop(term);
         self.canvas().invalidate();
+        self.inner.sync_ime();
     }
 
     /// Handles a reader wakeup. The paint is deferred to the next presented
@@ -271,6 +308,7 @@ impl Terminal {
         if schedule {
             self.schedule_frame();
         }
+        self.inner.sync_ime();
     }
 
     /// Registers a one-shot frame callback, which runs once the compositor
@@ -332,6 +370,92 @@ impl Inner {
         self.menu.get().expect("set at creation")
     }
 
+    /// The cell the composition caret occupies in the viewport: the preedit's
+    /// own caret while composing, otherwise the terminal cursor.
+    fn caret_cell(&self) -> (usize, usize) {
+        let (col, row) = {
+            let term = self.session.term();
+            (term.cursor.x, term.cursor.y + term.display_offset())
+        };
+        let advance = self
+            .state
+            .borrow()
+            .preedit
+            .as_ref()
+            .map(Preedit::caret)
+            .unwrap_or(0);
+        (col + advance, row)
+    }
+
+    /// The native IME caret rectangle in canvas-local logical coordinates:
+    /// the cell the composition caret sits in. aegle offsets it into the
+    /// window and clamps it there, so a partly visible cell still anchors the
+    /// candidate window inside the window.
+    fn ime_caret(&self, _size: Size) -> Option<Rect> {
+        let scale = self.shared.scale.get();
+        let cell = self.shared.renderer.borrow().cell_size();
+        if scale <= 0.0 || cell.width == 0 || cell.height == 0 {
+            return None;
+        }
+        let padding = self.shared.config.borrow().padding;
+        let (cols, rows) = self.state.borrow().grid;
+        let (cols, rows) = (cols as usize, rows as usize);
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        let (col, row) = self.caret_cell();
+        // A caret scrolled out of the viewport has nothing to anchor to, and
+        // the session ends until it returns. A composition running past the
+        // right edge keeps its anchor on the last column instead.
+        if row >= rows {
+            return None;
+        }
+        let col = col.min(cols - 1);
+        let (width, height) = (cell.width as f32 / scale, cell.height as f32 / scale);
+        Some(Rect::new(
+            padding + col as f32 * width,
+            padding + row as f32 * height,
+            width,
+            height,
+        ))
+    }
+
+    /// Republishes the native IME caret after it moved. An unchanged caret
+    /// sends nothing, so output floods never renegotiate the session.
+    fn sync_ime(&self) {
+        let cell = self.caret_cell();
+        {
+            let mut state = self.state.borrow_mut();
+            if state.ime_cell == Some(cell) {
+                return;
+            }
+            state.ime_cell = Some(cell);
+        }
+        self.canvas().request_ime_sync();
+    }
+
+    /// Applies one native IME transaction. Composition stays local — it is
+    /// drawn at the cursor and reaches the child only on commit — and the
+    /// deletion offsets are ignored because the terminal publishes no
+    /// surrounding excerpt, so nothing outside the composition is addressable.
+    fn compose(&self, ime: CanvasIme) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.preedit = match ime.preedit.is_empty() {
+                true => None,
+                false => Some(Preedit {
+                    text: ime.preedit,
+                    cursor: ime.cursor,
+                }),
+            };
+        }
+        if let Some(commit) = ime.commit {
+            // Committed text is the child's input, exactly like typing.
+            self.session.write(commit.into_bytes());
+        }
+        self.canvas().invalidate();
+    }
+
     fn report_colors(&self) {
         let palette = self.shared.palette.borrow();
         self.session.term().report_colors = [palette.foreground, palette.background];
@@ -372,6 +496,14 @@ impl Inner {
         };
         // Output arriving from here on wakes the UI again.
         self.session.take_dirty();
+        let state = self.state.borrow();
+        let preedit = state
+            .preedit
+            .as_ref()
+            .map(|preedit| PreeditView {
+                text: &preedit.text,
+                cursor: preedit.cursor,
+            });
         let term = self.session.term();
         let frame = Frame {
             term: &term,
@@ -379,6 +511,7 @@ impl Inner {
             cursor: config.cursor,
             focused,
             padding,
+            preedit,
         };
         if let Err(error) = renderer.render(self.surface, px, &frame) {
             eprintln!("axo: terminal render failed: {error}");
@@ -643,9 +776,16 @@ impl Inner {
                 }
                 canvas.invalidate();
             }
+            CanvasEvent::Ime(ime) => self.compose(ime),
+            CanvasEvent::ImeCancelled => {
+                if self.state.borrow_mut().preedit.take().is_some() {
+                    self.canvas().invalidate();
+                }
+            }
             CanvasEvent::Paste(text) => self.paste(&text),
             _ => {}
         }
+        self.sync_ime();
     }
 
     /// Ctrl+wheel zoom, applied to every terminal through the same action as
@@ -715,7 +855,7 @@ impl Block for Terminal {
 
 /// `path` with the home directory abbreviated to `~`.
 fn display_path(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+    if let Some(home) = config::home()
         && let Ok(rest) = path.strip_prefix(&home)
     {
         return match rest.as_os_str().is_empty() {
