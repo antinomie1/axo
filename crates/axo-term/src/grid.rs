@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use crate::cell::{Cell, Flags, Row};
+use crate::cell::{Row, Style};
 
 /// The visible lines of one screen and, for the primary screen, its history.
 ///
@@ -19,7 +19,7 @@ pub struct Grid {
 
 impl Grid {
     pub fn new(cols: usize, rows: usize, max_history: usize) -> Self {
-        let blank = Cell::default();
+        let blank = Style::default();
         let mut ring = VecDeque::with_capacity(rows + max_history.min(1024));
         for _ in 0..rows {
             ring.push_back(Row::new(cols, &blank));
@@ -71,7 +71,7 @@ impl Grid {
         top: usize,
         bottom: usize,
         n: usize,
-        template: &Cell,
+        template: &Style,
         keep: bool,
     ) -> usize {
         let n = n.min(bottom + 1 - top);
@@ -107,7 +107,7 @@ impl Grid {
     }
 
     /// Scrolls `top..=bottom` down by `n`, blanking the freed top lines.
-    pub fn scroll_down(&mut self, top: usize, bottom: usize, n: usize, template: &Cell) {
+    pub fn scroll_down(&mut self, top: usize, bottom: usize, n: usize, template: &Style) {
         let n = n.min(bottom + 1 - top);
         let base = self.ring.len() - self.rows;
         for _ in 0..n {
@@ -135,21 +135,17 @@ impl Grid {
     /// blank lines below the cursor first and then moves top lines to history;
     /// growing pulls lines back from history. Returns the cursor's new line.
     pub fn resize(&mut self, cols: usize, rows: usize, cursor: usize) -> usize {
-        let blank = Cell::default();
+        let blank = Style::default();
         let mut cursor = cursor;
         if cols != self.cols {
             let base = self.history_len();
-            for i in base..self.ring.len() {
-                let row = &mut self.ring[i];
-                if cols < row.cells.len() && row.cells[cols - 1].flags.has(Flags::WIDE) {
-                    row.cells[cols - 1] = Cell::blank(&row.cells[cols - 1]);
-                }
-                row.cells.resize(cols, blank);
+            for row in self.ring.range_mut(base..) {
+                row.resize(cols, &blank);
             }
             self.cols = cols;
         }
         while self.rows > rows && self.rows - 1 > cursor {
-            if !self.ring.back().unwrap().cells.iter().all(|c| *c == blank) {
+            if !self.ring.back().unwrap().is_blank(&blank) {
                 break;
             }
             self.ring.pop_back();
@@ -167,7 +163,7 @@ impl Grid {
         while self.rows < rows {
             if self.history_len() > 0 {
                 self.rows += 1;
-                self.row_mut(0).cells.resize(cols, blank);
+                self.row_mut(0).resize(cols, &blank);
                 cursor += 1;
             } else {
                 self.ring.push_back(Row::new(cols, &blank));

@@ -171,7 +171,9 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             }
         };
         for x in 0..cols {
-            let c = row.cells.get(x).copied().unwrap_or_default();
+            // The attributes are one run lookup, the character one word.
+            let style = row.style_at(x);
+            let flags = style.flags;
             // A composition column keeps the cell's colors and hides its
             // character; `None` is the trailing half of a wide one.
             let composing = overlay
@@ -180,11 +182,11 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             let (text, wide) = match composing {
                 Some(Some(text)) => (Some(text), width(text) == 2),
                 Some(None) => (None, false),
-                None => (Some(c.ch), c.flags.has(Flags::WIDE)),
+                None => (Some(row.ch(x)), row.is_wide(x)),
             };
-            let mut fg = palette.resolve(c.fg, true).unwrap();
-            let mut bg = palette.resolve(c.bg, false);
-            if c.flags.has(Flags::INVERSE) {
+            let mut fg = palette.resolve(style.fg, true).unwrap();
+            let mut bg = palette.resolve(style.bg, false);
+            if flags.has(Flags::INVERSE) {
                 (fg, bg) = (bg.unwrap_or(palette.background), Some(fg));
             }
             let selected = selection.is_some_and(|range| range.contains(line, x));
@@ -194,7 +196,7 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
                     fg = text;
                 }
             }
-            if c.flags.has(Flags::DIM) && !selected {
+            if flags.has(Flags::DIM) && !selected {
                 fg = palette.dim(fg);
             }
             let under_cursor = block
@@ -212,14 +214,14 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             let left = pad + x as f32 * cw;
             let drawn = match composing {
                 Some(_) => text,
-                None if !c.flags.has(Flags::SPACER) && !c.flags.has(Flags::HIDDEN) => text,
+                None if !row.is_spacer(x) && !flags.has(Flags::HIDDEN) => text,
                 None => None,
             };
             if let Some(ch) = drawn.filter(|ch| *ch != ' ') {
                 let key = GlyphKey {
                     ch,
-                    bold: c.flags.has(Flags::BOLD),
-                    italic: c.flags.has(Flags::ITALIC),
+                    bold: flags.has(Flags::BOLD),
+                    italic: flags.has(Flags::ITALIC),
                 };
                 if let Some(glyph) = glyphs.glyph(key) {
                     out.foreground.push(Quad {
@@ -237,12 +239,12 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             }
             let span = if wide { 2.0 } else { 1.0 };
             // Composition is underlined until the input method commits it.
-            if c.flags.has(Flags::UNDERLINE) || matches!(composing, Some(Some(_))) {
+            if flags.has(Flags::UNDERLINE) || matches!(composing, Some(Some(_))) {
                 let y = top + (cell.baseline as f32 + line_width).min(ch - line_width);
                 out.foreground
                     .push(solid(left, y, cw * span, line_width, fg));
             }
-            if c.flags.has(Flags::STRIKE) {
+            if flags.has(Flags::STRIKE) {
                 let y = top + (ch / 2.0).round();
                 out.foreground
                     .push(solid(left, y, cw * span, line_width, fg));

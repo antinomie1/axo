@@ -1,11 +1,11 @@
 //! The terminal state machine: VT sequences applied to two screens.
 
 use unicode_width::UnicodeWidthChar;
-use vte::{Params, Perform};
 
 use crate::{
-    cell::{Cell, Color, Flags},
+    cell::{Color, Flags, Style},
     grid::Grid,
+    parser::{ParamSource, Parser},
     selection::{Point, Range, Selection},
 };
 
@@ -78,7 +78,8 @@ enum Charset {
 pub struct Cursor {
     pub x: usize,
     pub y: usize,
-    pub template: Cell,
+    /// The attributes a printed character inherits.
+    pub pen: Style,
     /// The last column was written; the next printable wraps first.
     wrap_next: bool,
 }
@@ -116,7 +117,7 @@ pub struct Term {
     /// Default foreground and background reported to OSC 10/11 queries.
     pub report_colors: [[u8; 3]; 2],
     scrollback: usize,
-    parser: vte::Parser,
+    parser: Parser,
 }
 
 /// The local path of an OSC 7 `file://host/path` URI, percent-decoded, or
@@ -206,15 +207,56 @@ impl Term {
             selection: None,
             report_colors: [[0xdd; 3], [0x00; 3]],
             scrollback,
-            parser: vte::Parser::new(),
+            parser: Parser::new(),
         }
     }
 
     /// Applies output bytes from the child process.
     pub fn advance(&mut self, bytes: &[u8]) {
+        // The parser needs `&mut self` for the terminal it drives, so it is
+        // moved out for the call; it owns no allocation and is small.
         let mut parser = std::mem::take(&mut self.parser);
         parser.advance(self, bytes);
         self.parser = parser;
+    }
+
+    /// Whether printable ASCII can skip the per-character path: the graphics
+    /// charset and insert mode both need it.
+    #[inline(always)]
+    pub(crate) fn fast_print_ready(&self) -> bool {
+        !self.modes.insert && matches!(self.charsets[self.shift], Charset::Ascii)
+    }
+
+    /// Writes a run of printable ASCII (0x20..=0x7e) with the default charset.
+    ///
+    /// This is the path essentially all output takes: the row takes the whole
+    /// slice and writes its text plane in one pass, then the attributes as a
+    /// single run.
+    pub(crate) fn print_run(&mut self, run: &[u8]) {
+        let cols = self.cols();
+        let pen = self.cursor.pen;
+        let mut i = 0;
+        while i < run.len() {
+            if self.cursor.wrap_next && self.modes.autowrap {
+                let y = self.cursor.y;
+                self.grid_mut().row_mut(y).wrapped = true;
+                self.cursor.x = 0;
+                self.linefeed();
+            }
+            let (start, y) = (self.cursor.x, self.cursor.y);
+            let len = (cols - start).min(run.len() - i);
+            self.grid_mut()
+                .row_mut(y)
+                .write_ascii(start, &run[i..i + len], pen);
+            let end = start + len;
+            i += len;
+            if end >= cols {
+                self.cursor.x = cols - 1;
+                self.cursor.wrap_next = true;
+            } else {
+                self.cursor.x = end;
+            }
+        }
     }
 
     #[inline]
@@ -350,7 +392,7 @@ impl Term {
     /// Scrolls the region up; lines leaving a top-anchored primary region enter history.
     fn scroll_up_region(&mut self, top: usize, n: usize) {
         let keep = !self.alt_active && top == 0;
-        let (bottom, template) = (self.bottom, self.cursor.template);
+        let (bottom, template) = (self.bottom, self.cursor.pen);
         let added = self.grid_mut().scroll_up(top, bottom, n, &template, keep);
         if added > 0 {
             if self.display_offset > 0 {
@@ -374,7 +416,7 @@ impl Term {
     fn reverse_index(&mut self) {
         self.cursor.wrap_next = false;
         if self.cursor.y == self.top {
-            let (top, bottom, template) = (self.top, self.bottom, self.cursor.template);
+            let (top, bottom, template) = (self.top, self.bottom, self.cursor.pen);
             self.grid_mut().scroll_down(top, bottom, 1, &template);
         } else if self.cursor.y > 0 {
             self.cursor.y -= 1;
@@ -383,19 +425,8 @@ impl Term {
 
     /// Blanks `from..to` on line `y`, also clearing wide characters cut in half.
     fn clear_cells(&mut self, y: usize, from: usize, to: usize) {
-        let template = self.cursor.template;
-        let row = &mut self.grid_mut().row_mut(y).cells;
-        let to = to.min(row.len());
-        if from >= to {
-            return;
-        }
-        if from > 0 && row[from].flags.has(Flags::SPACER) {
-            row[from - 1] = Cell::blank(&template);
-        }
-        if to < row.len() && row[to].flags.has(Flags::SPACER) {
-            row[to] = Cell::blank(&template);
-        }
-        row[from..to].fill(Cell::blank(&template));
+        let pen = self.cursor.pen;
+        self.grid_mut().row_mut(y).clear(from, to, &pen);
     }
 
     fn goto(&mut self, x: usize, y: usize) {
@@ -480,12 +511,8 @@ impl Term {
                 self.linefeed();
             }
             let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols());
-            if self.grid().row(y).cells[x].flags.0 & (Flags::WIDE | Flags::SPACER) != 0 {
-                self.clear_cells(y, x, x + 1);
-            }
-            let mut cell = self.cursor.template;
-            cell.ch = c;
-            self.grid_mut().row_mut(y).cells[x] = cell;
+            let pen = self.cursor.pen;
+            self.grid_mut().row_mut(y).write_ascii(x, &[c as u8], pen);
             if x + 1 >= cols {
                 self.cursor.wrap_next = true;
             } else {
@@ -519,28 +546,12 @@ impl Term {
             self.linefeed();
         }
         let (x, y) = (self.cursor.x, self.cursor.y);
-        let template = self.cursor.template;
+        let pen = self.cursor.pen;
         if self.modes.insert {
-            let row = &mut self.grid_mut().row_mut(y).cells;
-            row[x..].rotate_right(width);
+            self.grid_mut().row_mut(y).insert_cells(x, width, &pen);
         }
-        // Overwriting half of a wide character blanks its other half.
-        self.clear_cells(y, x, x + width);
-        let row = &mut self.grid_mut().row_mut(y).cells;
-        let mut cell = template;
-        cell.ch = c;
-        cell.flags.set(Flags::WIDE | Flags::SPACER, false);
-        if width == 2 {
-            cell.flags.set(Flags::WIDE, true);
-            row[x] = cell;
-            let mut spacer = template;
-            spacer.ch = ' ';
-            spacer.flags.set(Flags::WIDE, false);
-            spacer.flags.set(Flags::SPACER, true);
-            row[x + 1] = spacer;
-        } else {
-            row[x] = cell;
-        }
+        // The row blanks a wide character the character overlaps.
+        self.grid_mut().row_mut(y).write_char(x, c, width, pen);
         if x + width >= cols {
             self.cursor.x = cols - 1;
             self.cursor.wrap_next = true;
@@ -549,69 +560,72 @@ impl Term {
         }
     }
 
-    fn sgr(&mut self, params: &Params) {
-        let t = &mut self.cursor.template;
-        let mut iter = params.iter();
+    fn sgr<P: ParamSource>(&mut self, params: &P) {
+        let mut pen = self.cursor.pen;
         if params.is_empty() {
-            *t = Cell::default();
+            self.cursor.pen = Style::default();
             return;
         }
-        while let Some(param) = iter.next() {
-            match param[0] {
-                0 => *t = Cell::default(),
-                1 => t.flags.set(Flags::BOLD, true),
-                2 => t.flags.set(Flags::DIM, true),
-                3 => t.flags.set(Flags::ITALIC, true),
-                4 => t.flags.set(Flags::UNDERLINE, param.get(1) != Some(&0)),
-                7 => t.flags.set(Flags::INVERSE, true),
-                8 => t.flags.set(Flags::HIDDEN, true),
-                9 => t.flags.set(Flags::STRIKE, true),
-                21 => t.flags.set(Flags::UNDERLINE, true),
-                22 => t.flags.set(Flags::BOLD | Flags::DIM, false),
-                23 => t.flags.set(Flags::ITALIC, false),
-                24 => t.flags.set(Flags::UNDERLINE, false),
-                27 => t.flags.set(Flags::INVERSE, false),
-                28 => t.flags.set(Flags::HIDDEN, false),
-                29 => t.flags.set(Flags::STRIKE, false),
-                n @ 30..=37 => t.fg = Color::Indexed(n as u8 - 30),
-                39 => t.fg = Color::Default,
-                n @ 40..=47 => t.bg = Color::Indexed(n as u8 - 40),
-                49 => t.bg = Color::Default,
-                n @ 90..=97 => t.fg = Color::Indexed(n as u8 - 90 + 8),
-                n @ 100..=107 => t.bg = Color::Indexed(n as u8 - 100 + 8),
+        let mut i = 0;
+        while i < params.len() {
+            let group = params.group(i);
+            i += 1;
+            match group[0] {
+                0 => pen = Style::default(),
+                1 => pen.flags.set(Flags::BOLD, true),
+                2 => pen.flags.set(Flags::DIM, true),
+                3 => pen.flags.set(Flags::ITALIC, true),
+                4 => pen.flags.set(Flags::UNDERLINE, group.get(1) != Some(&0)),
+                7 => pen.flags.set(Flags::INVERSE, true),
+                8 => pen.flags.set(Flags::HIDDEN, true),
+                9 => pen.flags.set(Flags::STRIKE, true),
+                21 => pen.flags.set(Flags::UNDERLINE, true),
+                22 => pen.flags.set(Flags::BOLD | Flags::DIM, false),
+                23 => pen.flags.set(Flags::ITALIC, false),
+                24 => pen.flags.set(Flags::UNDERLINE, false),
+                27 => pen.flags.set(Flags::INVERSE, false),
+                28 => pen.flags.set(Flags::HIDDEN, false),
+                29 => pen.flags.set(Flags::STRIKE, false),
+                n @ 30..=37 => pen.fg = Color::Indexed(n as u8 - 30),
+                39 => pen.fg = Color::Default,
+                n @ 40..=47 => pen.bg = Color::Indexed(n as u8 - 40),
+                49 => pen.bg = Color::Default,
+                n @ 90..=97 => pen.fg = Color::Indexed(n as u8 - 90 + 8),
+                n @ 100..=107 => pen.bg = Color::Indexed(n as u8 - 100 + 8),
                 n @ (38 | 48 | 58) => {
-                    // Colon form carries the color in sub-parameters, semicolon form in
-                    // the following parameters.
-                    let color = if param.len() > 1 {
-                        extended_color(&param[1..])
+                    // Colon form carries the color in the same group's
+                    // sub-parameters, semicolon form in the groups that follow.
+                    let color = if group.len() > 1 {
+                        extended_color(&group[1..])
                     } else {
-                        let mut rest = [0u16; 4];
-                        let kind = iter.next().map(|p| p[0]);
-                        let count = match kind {
-                            Some(2) => 3,
-                            Some(5) => 1,
-                            _ => 0,
-                        };
-                        for slot in rest.iter_mut().take(count) {
-                            *slot = iter.next().map(|p| p[0]).unwrap_or(0);
-                        }
-                        match kind {
-                            Some(2) => {
-                                Some(Color::Rgb(rest[0] as u8, rest[1] as u8, rest[2] as u8))
-                            }
-                            Some(5) => Some(Color::Indexed(rest[0] as u8)),
+                        // `38;2;r;g;b` and `38;5;index` carry their arguments in
+                        // the groups that follow this one.
+                        let kind = params.group(i).first().copied();
+                        let value = |k: usize| params.group(i + k).first().copied().unwrap_or(0);
+                        let (r, g, b) = (value(1), value(2), value(3));
+                        let color = match kind {
+                            Some(2) => Some(Color::Rgb(r as u8, g as u8, b as u8)),
+                            Some(5) => Some(Color::Indexed(r as u8)),
                             _ => None,
-                        }
+                        };
+                        i += match kind {
+                            Some(2) => 4,
+                            Some(5) => 2,
+                            Some(_) => 1,
+                            None => 0,
+                        };
+                        color
                     };
                     match (n, color) {
-                        (38, Some(c)) => t.fg = c,
-                        (48, Some(c)) => t.bg = c,
+                        (38, Some(c)) => pen.fg = c,
+                        (48, Some(c)) => pen.bg = c,
                         _ => {}
                     }
                 }
                 _ => {}
             }
         }
+        self.cursor.pen = pen;
     }
 
     fn set_mode(&mut self, private: bool, mode: u16, on: bool) {
@@ -668,41 +682,15 @@ fn extended_color(sub: &[u16]) -> Option<Color> {
     }
 }
 
-/// First values of each parameter, with zero meaning "default".
-struct Args([u16; 16], usize);
-
-impl Args {
-    fn new(params: &Params) -> Self {
-        let mut args = [0u16; 16];
-        let mut count = 0;
-        for param in params.iter().take(16) {
-            args[count] = param[0];
-            count += 1;
-        }
-        Self(args, count)
-    }
-    /// Parameter `i`, or `default` when absent or zero.
-    #[inline]
-    fn get(&self, i: usize, default: usize) -> usize {
-        match self.0[i] {
-            0 => default,
-            v if i < self.1 => v as usize,
-            _ => default,
-        }
-    }
-    /// Parameter `i` where zero is meaningful.
-    #[inline]
-    fn raw(&self, i: usize) -> u16 {
-        if i < self.1 { self.0[i] } else { 0 }
-    }
-}
-
-impl Perform for Term {
-    fn print(&mut self, c: char) {
+/// The actions the parser performs on the terminal.
+impl Term {
+    /// Prints one character at the cursor.
+    pub(crate) fn print(&mut self, c: char) {
         self.print_char(c);
     }
 
-    fn execute(&mut self, byte: u8) {
+    /// Runs a C0 control.
+    pub(crate) fn execute(&mut self, byte: u8) {
         match byte {
             0x08 => {
                 self.cursor.wrap_next = false;
@@ -727,66 +715,70 @@ impl Perform for Term {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+    /// Runs a CSI sequence (`ESC [ ... final`).
+    pub(crate) fn csi<P: ParamSource>(
+        &mut self,
+        params: &P,
+        inter: &[u8],
+        ignore: bool,
+        action: u8,
+    ) {
         if ignore {
             return;
         }
-        let args = Args::new(params);
-        let private = intermediates.first() == Some(&b'?');
+        let private = inter.first() == Some(&b'?');
         let (cols, rows) = (self.cols(), self.rows());
         let (x, y) = (self.cursor.x, self.cursor.y);
-        match (action, intermediates) {
-            ('@', []) => {
-                let n = args.get(0, 1).min(cols - x);
-                let template = self.cursor.template;
-                let row = &mut self.grid_mut().row_mut(y).cells;
-                row[x..].rotate_right(n);
-                row[x..x + n].fill(Cell::blank(&template));
+        match (action, inter) {
+            (b'@', []) => {
+                let n = params.get(0, 1).min(cols - x);
+                let pen = self.cursor.pen;
+                self.grid_mut().row_mut(y).insert_cells(x, n, &pen);
             }
-            ('A', []) => {
+            (b'A', []) => {
                 let top = if y >= self.top { self.top } else { 0 };
-                self.cursor.y = y.saturating_sub(args.get(0, 1)).max(top);
+                self.cursor.y = y.saturating_sub(params.get(0, 1)).max(top);
                 self.cursor.wrap_next = false;
             }
-            ('B' | 'e', []) => {
+            (b'B' | b'e', []) => {
                 let bottom = if y <= self.bottom {
                     self.bottom
                 } else {
                     rows - 1
                 };
-                self.cursor.y = (y + args.get(0, 1)).min(bottom);
+                self.cursor.y = (y + params.get(0, 1)).min(bottom);
                 self.cursor.wrap_next = false;
             }
-            ('C' | 'a', []) => {
-                self.cursor.x = (x + args.get(0, 1)).min(cols - 1);
+            (b'C' | b'a', []) => {
+                self.cursor.x = (x + params.get(0, 1)).min(cols - 1);
                 self.cursor.wrap_next = false;
             }
-            ('D', []) => {
-                self.cursor.x = x.saturating_sub(args.get(0, 1));
+            (b'D', []) => {
+                self.cursor.x = x.saturating_sub(params.get(0, 1));
                 self.cursor.wrap_next = false;
             }
-            ('E', []) => {
-                self.cursor.y = (y + args.get(0, 1)).min(rows - 1);
+            (b'E', []) => {
+                self.cursor.y = (y + params.get(0, 1)).min(rows - 1);
                 self.cursor.x = 0;
                 self.cursor.wrap_next = false;
             }
-            ('F', []) => {
-                self.cursor.y = y.saturating_sub(args.get(0, 1));
+            (b'F', []) => {
+                self.cursor.y = y.saturating_sub(params.get(0, 1));
                 self.cursor.x = 0;
                 self.cursor.wrap_next = false;
             }
-            ('G' | '`', []) => {
-                self.cursor.x = (args.get(0, 1) - 1).min(cols - 1);
+            (b'G' | b'`', []) => {
+                self.cursor.x = (params.get(0, 1) - 1).min(cols - 1);
                 self.cursor.wrap_next = false;
             }
-            ('H' | 'f', []) => self.goto(args.get(1, 1) - 1, args.get(0, 1) - 1),
-            ('I', []) => {
-                for _ in 0..args.get(0, 1) {
+            (b'H' | b'f', []) => self.goto(params.get(1, 1) - 1, params.get(0, 1) - 1),
+            (b'I', []) => {
+                for _ in 0..params.get(0, 1) {
                     self.execute(0x09);
                 }
             }
-            ('J', []) => {
-                match args.raw(0) {
+            (b'J', []) => {
+                match params.raw(0) {
                     0 => {
                         self.clear_cells(y, x, cols);
                         for line in y + 1..rows {
@@ -812,42 +804,40 @@ impl Perform for Term {
                 }
                 self.selection = None;
             }
-            ('K', []) => match args.raw(0) {
+            (b'K', []) => match params.raw(0) {
                 0 => self.clear_cells(y, x, cols),
                 1 => self.clear_cells(y, 0, x + 1),
                 2 => self.clear_cells(y, 0, cols),
                 _ => {}
             },
-            ('L', []) if (self.top..=self.bottom).contains(&y) => {
-                let (bottom, template) = (self.bottom, self.cursor.template);
+            (b'L', []) if (self.top..=self.bottom).contains(&y) => {
+                let (bottom, template) = (self.bottom, self.cursor.pen);
                 self.grid_mut()
-                    .scroll_down(y, bottom, args.get(0, 1), &template);
+                    .scroll_down(y, bottom, params.get(0, 1), &template);
                 self.cursor.x = 0;
                 self.cursor.wrap_next = false;
             }
-            ('M', []) if (self.top..=self.bottom).contains(&y) => {
-                let (bottom, template) = (self.bottom, self.cursor.template);
+            (b'M', []) if (self.top..=self.bottom).contains(&y) => {
+                let (bottom, template) = (self.bottom, self.cursor.pen);
                 self.grid_mut()
-                    .scroll_up(y, bottom, args.get(0, 1), &template, false);
+                    .scroll_up(y, bottom, params.get(0, 1), &template, false);
                 self.cursor.x = 0;
                 self.cursor.wrap_next = false;
             }
-            ('P', []) => {
-                let n = args.get(0, 1).min(cols - x);
-                let template = self.cursor.template;
-                let row = &mut self.grid_mut().row_mut(y).cells;
-                row[x..].rotate_left(n);
-                row[cols - n..].fill(Cell::blank(&template));
+            (b'P', []) => {
+                let n = params.get(0, 1).min(cols - x);
+                let pen = self.cursor.pen;
+                self.grid_mut().row_mut(y).remove_cells(x, n, &pen);
             }
-            ('S', []) => self.scroll_up_region(self.top, args.get(0, 1)),
-            ('T', []) => {
-                let (top, bottom, template) = (self.top, self.bottom, self.cursor.template);
+            (b'S', []) => self.scroll_up_region(self.top, params.get(0, 1)),
+            (b'T', []) => {
+                let (top, bottom, template) = (self.top, self.bottom, self.cursor.pen);
                 self.grid_mut()
-                    .scroll_down(top, bottom, args.get(0, 1), &template);
+                    .scroll_down(top, bottom, params.get(0, 1), &template);
             }
-            ('X', []) => self.clear_cells(y, x, x + args.get(0, 1)),
-            ('Z', []) => {
-                for _ in 0..args.get(0, 1) {
+            (b'X', []) => self.clear_cells(y, x, x + params.get(0, 1)),
+            (b'Z', []) => {
+                for _ in 0..params.get(0, 1) {
                     let mut x = self.cursor.x;
                     while x > 0 {
                         x -= 1;
@@ -858,30 +848,30 @@ impl Perform for Term {
                     self.cursor.x = x;
                 }
             }
-            ('b', []) => {
-                let previous = (x > 0).then(|| self.grid().row(y).cells[x - 1].ch);
+            (b'b', []) => {
+                let previous = (x > 0).then(|| self.grid().row(y).ch(x - 1));
                 if let Some(c) = previous {
-                    for _ in 0..args.get(0, 1).min(cols * rows) {
+                    for _ in 0..params.get(0, 1).min(cols * rows) {
                         self.print_char(c);
                     }
                 }
             }
-            ('c', []) => self.respond(b"\x1b[?6c"),
-            ('c', [b'>']) => self.respond(b"\x1b[>1;10;0c"),
-            ('d', []) => self.goto_row(args.get(0, 1) - 1),
-            ('g', []) => match args.raw(0) {
+            (b'c', []) => self.respond(b"\x1b[?6c"),
+            (b'c', [b'>']) => self.respond(b"\x1b[>1;10;0c"),
+            (b'd', []) => self.goto_row(params.get(0, 1) - 1),
+            (b'g', []) => match params.raw(0) {
                 0 => self.tabs[x] = false,
                 3 => self.tabs.fill(false),
                 _ => {}
             },
-            ('h', _) | ('l', _) => {
-                let on = action == 'h';
-                for param in params.iter() {
-                    self.set_mode(private, param[0], on);
+            (b'h', _) | (b'l', _) => {
+                let on = action == b'h';
+                for i in 0..params.len() {
+                    self.set_mode(private, params.raw(i), on);
                 }
             }
-            ('m', []) => self.sgr(params),
-            ('n', []) => match args.raw(0) {
+            (b'm', []) => self.sgr(params),
+            (b'n', []) => match params.raw(0) {
                 5 => self.respond(b"\x1b[0n"),
                 6 => {
                     let row = match self.modes.origin {
@@ -892,43 +882,44 @@ impl Perform for Term {
                 }
                 _ => {}
             },
-            ('q', [b' ']) => {
-                self.cursor_shape = match args.raw(0) {
+            (b'q', [b' ']) => {
+                self.cursor_shape = match params.raw(0) {
                     1 | 2 => Some(CursorShape::Block),
                     3 | 4 => Some(CursorShape::Underline),
                     5 | 6 => Some(CursorShape::Bar),
                     _ => None,
                 }
             }
-            ('p', [b'!']) => {
+            (b'p', [b'!']) => {
                 self.modes = Modes::default();
-                self.cursor.template = Cell::default();
+                self.cursor.pen = Style::default();
                 self.top = 0;
                 self.bottom = rows - 1;
                 self.charsets = [Charset::Ascii; 2];
                 self.shift = 0;
             }
-            ('r', []) => {
-                let top = args.get(0, 1) - 1;
-                let bottom = args.get(1, rows).min(rows) - 1;
+            (b'r', []) => {
+                let top = params.get(0, 1) - 1;
+                let bottom = params.get(1, rows).min(rows) - 1;
                 if top < bottom {
                     self.top = top;
                     self.bottom = bottom;
                     self.goto(0, 0);
                 }
             }
-            ('s', []) => self.save_cursor(),
-            ('u', []) => self.restore_cursor(),
-            ('t', []) if args.raw(0) == 18 => self.respond(format!("\x1b[8;{rows};{cols}t")),
+            (b's', []) => self.save_cursor(),
+            (b'u', []) => self.restore_cursor(),
+            (b't', []) if params.raw(0) == 18 => self.respond(format!("\x1b[8;{rows};{cols}t")),
             _ => {}
         }
     }
 
-    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+    /// Runs an escape sequence (`ESC`, intermediates, final).
+    pub(crate) fn esc(&mut self, inter: &[u8], ignore: bool, byte: u8) {
         if ignore {
             return;
         }
-        match (intermediates, byte) {
+        match (inter, byte) {
             ([], b'7') => self.save_cursor(),
             ([], b'8') => self.restore_cursor(),
             ([], b'D') => self.linefeed(),
@@ -951,55 +942,500 @@ impl Perform for Term {
             ([b'#'], b'8') => {
                 let rows = self.rows();
                 for y in 0..rows {
-                    for cell in &mut self.grid_mut().row_mut(y).cells {
-                        *cell = Cell {
-                            ch: 'E',
-                            ..Cell::default()
-                        };
-                    }
+                    self.grid_mut().row_mut(y).fill_with('E', Style::default());
                 }
             }
             _ => {}
         }
     }
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        match params {
-            [b"0" | b"2", rest @ ..] if !rest.is_empty() => {
-                let title = rest
-                    .iter()
-                    .map(|part| String::from_utf8_lossy(part))
-                    .collect::<Vec<_>>()
-                    .join(";");
+    /// Runs an operating system command (`ESC ] ... BEL` or `ESC \`), which the
+    /// parser hands over as its raw payload.
+    pub(crate) fn osc(&mut self, raw: &[u8], bell_terminated: bool) {
+        let (command, payload) = match raw.iter().position(|byte| *byte == b';') {
+            Some(at) => (&raw[..at], &raw[at + 1..]),
+            None => (raw, &raw[raw.len()..]),
+        };
+        match (command, payload) {
+            (b"0" | b"2", payload) if !payload.is_empty() => {
+                let title = String::from_utf8_lossy(payload);
                 if title != self.title {
-                    self.title = title;
+                    self.title = title.into_owned();
                     self.title_changed = true;
                 }
             }
             // OSC 7: the shell reports its directory as a `file://host/path`
             // URI, which no other source can answer for a child that changes
             // directory (and the only source on Windows).
-            [b"7", rest @ ..] => {
-                let uri = rest
-                    .iter()
-                    .map(|part| String::from_utf8_lossy(part))
-                    .collect::<Vec<_>>()
-                    .join(";");
+            (b"7", payload) => {
+                let uri = String::from_utf8_lossy(payload);
                 if let Some(cwd) = parse_directory(&uri)
                     && self.cwd.as_deref() != Some(&cwd)
                 {
                     self.cwd = Some(cwd);
                 }
             }
-            [which @ (b"10" | b"11"), b"?"] => {
-                let [r, g, b] = self.report_colors[(*which == b"11") as usize];
+            (command @ (b"10" | b"11"), b"?") => {
+                let [r, g, b] = self.report_colors[(command == b"11") as usize];
                 let end = if bell_terminated { "\x07" } else { "\x1b\\" };
-                let which = std::str::from_utf8(which).unwrap_or("10");
+                let which = std::str::from_utf8(command).unwrap_or("10");
                 self.respond(format!(
                     "\x1b]{which};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{end}"
                 ));
             }
             _ => {}
         }
+    }
+}
+
+/// The hand-written parser is checked against the reference implementation
+/// (`vte`) it replaced: both drive the same terminal methods, over random
+/// output split at random points, and the resulting state must be identical.
+#[cfg(test)]
+mod differential {
+    use super::*;
+
+    /// Feeds `vte`'s callbacks into the same actions the new parser calls.
+    struct Reference<'a>(&'a mut Term);
+
+    impl vte::Perform for Reference<'_> {
+        fn print(&mut self, c: char) {
+            self.0.print(c);
+        }
+        fn execute(&mut self, byte: u8) {
+            self.0.execute(byte);
+        }
+        fn csi_dispatch(
+            &mut self,
+            params: &vte::Params,
+            intermediates: &[u8],
+            ignore: bool,
+            action: char,
+        ) {
+            self.0.csi(params, intermediates, ignore, action as u8);
+        }
+        fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+            self.0.esc(intermediates, ignore, byte);
+        }
+        fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+            let mut raw = Vec::new();
+            for (i, part) in params.iter().enumerate() {
+                if i > 0 {
+                    raw.push(b';');
+                }
+                raw.extend_from_slice(part);
+            }
+            self.0.osc(&raw, bell_terminated);
+        }
+    }
+
+    /// Everything an application can observe, as text, for a diffable failure.
+    fn dump(term: &Term) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "alt={} cursor=({},{},wrap={}) tpl={:?}/{:?}/{} top={} bottom={} shift={} \
+             display={} shape={:?} title={:?} cwd={:?} responses={:?}\n",
+            term.alt_active,
+            term.cursor.x,
+            term.cursor.y,
+            term.cursor.wrap_next,
+            term.cursor.pen.fg,
+            term.cursor.pen.bg,
+            term.cursor.pen.flags.0,
+            term.top,
+            term.bottom,
+            term.shift,
+            term.display_offset,
+            term.cursor_shape,
+            term.title,
+            term.cwd,
+            String::from_utf8_lossy(&term.responses),
+        ));
+        out.push_str(&format!(
+            "modes={:?} charsets={:?} tabs={:?}\n",
+            (
+                term.modes.app_cursor,
+                term.modes.app_keypad,
+                term.modes.show_cursor,
+                term.modes.autowrap,
+                term.modes.origin,
+                term.modes.insert,
+                term.modes.bracketed_paste,
+                term.modes.focus_events,
+                term.modes.mouse,
+                term.modes.mouse_sgr,
+                term.modes.alternate_scroll
+            ),
+            term.charsets,
+            term.tabs,
+        ));
+        for (name, grid) in [("primary", &term.primary), ("alt", &term.alt)] {
+            out.push_str(&format!(
+                "{name} {}x{} history={}\n",
+                grid.cols(),
+                grid.rows(),
+                grid.history_len()
+            ));
+            for line in -(grid.history_len() as isize)..grid.rows() as isize {
+                let Some(row) = grid.line(line) else { continue };
+                out.push_str(if row.wrapped { "W|" } else { "-|" });
+                for x in 0..grid.cols() {
+                    let style = row.style_at(x);
+                    out.push_str(&format!(
+                        "{}/{}/{}/{:?}/{:?}/{}/",
+                        row.ch(x),
+                        row.is_spacer(x) as u8,
+                        row.is_wide(x) as u8,
+                        style.fg,
+                        style.bg,
+                        style.flags.0
+                    ));
+                }
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// A small deterministic generator: xorshift64*, so failures reproduce.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: u64) -> usize {
+            (self.next() % n) as usize
+        }
+        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+            &items[self.below(items.len() as u64)]
+        }
+    }
+
+    /// One random piece of terminal output.
+    fn fragment(rng: &mut Rng, out: &mut Vec<u8>, utf8: bool) {
+        const CSI_FINALS: &[u8] = b"ABCDEFGHIJKLMNOPSTXZ@`abcdeghlmnpqrstu";
+        const COLORS: &[&str] = &[
+            "38;5;196",
+            "48;5;21",
+            "38;2;255;128;0",
+            "48;2;1;2;3",
+            "38:2::9:8:7",
+            "38:5:33",
+            "58;5;9",
+            "38;2;1;2",
+            "48:2::1:2:3",
+        ];
+        match rng.below(100) {
+            0..=34 => {
+                // Printable ASCII, sometimes long enough to wrap several lines.
+                let len = 1 + rng.below(40);
+                for _ in 0..len {
+                    out.push(b' ' + rng.below(95) as u8);
+                }
+            }
+            35..=44 if utf8 => {
+                // Non-ASCII text: narrow, wide, and C1 controls written as UTF-8.
+                out.extend_from_slice(rng.pick(&[
+                    "héllo".as_bytes(),
+                    "日本語".as_bytes(),
+                    "│─└┐".as_bytes(),
+                    "🙂".as_bytes(),
+                    "✓".as_bytes(),
+                    "æøå".as_bytes(),
+                    "\u{80}\u{9b}".as_bytes(),
+                ]));
+            }
+            35..=44 => {
+                // Without UTF-8 in play, box drawing comes from the graphics
+                // charset instead.
+                out.extend_from_slice(b"\x1b(0lqk\x1b(B");
+            }
+            45..=57 => {
+                // Control characters that reach the grid.
+                out.push(*rng.pick(b"\n\r\t\x08\x0e\x0f\x07\x00\x18\x1a\x7f"));
+            }
+            58..=80 => {
+                // SGR, sometimes with extended colors.
+                out.extend_from_slice(b"\x1b[");
+                let parts = rng.below(4) + 1;
+                for i in 0..parts {
+                    if i > 0 {
+                        out.push(b';');
+                    }
+                    match rng.below(10) {
+                        0..=3 => out.extend_from_slice(rng.pick(COLORS).as_bytes()),
+                        4 => out.extend_from_slice(b"4:3"),
+                        5 => out.extend_from_slice(b"38;5"),
+                        _ => {
+                            let codes: [&[u8]; 10] = [
+                                b"0", b"1", b"2", b"4", b"7", b"22", b"39", b"49", b"90", b"100",
+                            ];
+                            out.extend_from_slice(codes[rng.below(10)]);
+                        }
+                    }
+                }
+                out.push(b'm');
+            }
+            81..=92 => {
+                // Movement, erasing, editing and modes.
+                out.extend_from_slice(b"\x1b[");
+                if rng.below(4) == 0 {
+                    out.push(*rng.pick(b"?<>"));
+                }
+                let parts = rng.below(3);
+                for i in 0..parts {
+                    if i > 0 {
+                        out.push(b';');
+                    }
+                    let values: [&[u8]; 10] = [
+                        b"1", b"2", b"3", b"5", b"10", b"24", b"80", b"1049", b"1000", b"2004",
+                    ];
+                    out.extend_from_slice(values[rng.below(10)]);
+                }
+                out.push(*rng.pick(CSI_FINALS));
+            }
+            93..=97 => {
+                // OSC with a short payload, BEL- or ST-terminated.
+                let payload = *rng.pick(&[
+                    "0;title",
+                    "2;a b;c",
+                    "7;file://host/tmp/x%20y",
+                    "10;?",
+                    "11;?",
+                    "0;",
+                    "52;c;YWJj",
+                    "9;notify;hi",
+                    "133;A",
+                ]);
+                out.extend_from_slice(b"\x1b]");
+                out.extend_from_slice(payload.as_bytes());
+                out.extend_from_slice(if rng.below(2) == 0 {
+                    b"\x07"
+                } else {
+                    b"\x1b\\"
+                });
+            }
+            98 => {
+                // ESC sequences with and without intermediates.
+                out.push(0x1b);
+                if rng.below(2) == 0 {
+                    out.push(*rng.pick(b"()#"));
+                }
+                out.push(*rng.pick(b"78DEHMc=>\\*"));
+            }
+            _ => {
+                // DCS / SOS / PM / APC payloads.
+                out.extend_from_slice(rng.pick(&[
+                    b"\x1bP1$r0m\x1b\\".as_slice(),
+                    b"\x1bP>|axo\x1b\\".as_slice(),
+                    b"\x1bX junk \x1b\\".as_slice(),
+                    b"\x1b^pm\x07".as_slice(),
+                    b"\x1b_apc\x1b\\".as_slice(),
+                    b"\x1bPq#0;2;0;0;0\x1b\\".as_slice(),
+                ]));
+            }
+        }
+    }
+
+    /// Generates `count` fragments into one byte stream.
+    fn corpus(seed: u64, count: usize, utf8: bool) -> Vec<u8> {
+        let mut rng = Rng(seed);
+        let mut out = Vec::new();
+        for _ in 0..count {
+            fragment(&mut rng, &mut out, utf8);
+        }
+        out
+    }
+
+    /// Feeds both parsers the same pieces and compares after every one.
+    fn compare(pieces: &[&[u8]], label: &str) {
+        let (cols, rows) = (24, 8);
+        let mut mine = Term::new(cols, rows, 32);
+        let mut theirs = Term::new(cols, rows, 32);
+        let mut parser = vte::Parser::new();
+        for piece in pieces {
+            mine.advance(piece);
+            parser.advance(&mut Reference(&mut theirs), piece);
+            let (ours, reference) = (dump(&mine), dump(&theirs));
+            assert!(
+                ours == reference,
+                "{label}: diverged after {:?}; first difference:\n{}",
+                String::from_utf8_lossy(piece),
+                first_difference(&ours, &reference)
+            );
+        }
+    }
+
+    fn every_split(bytes: &[u8], chunk: usize) -> Vec<&[u8]> {
+        bytes.chunks(chunk.max(1)).collect()
+    }
+
+    /// Splits at character boundaries: a multi-byte character is never cut.
+    fn char_splits(bytes: &[u8], chunk: usize) -> Vec<&[u8]> {
+        let mut pieces = Vec::new();
+        let mut start = 0;
+        while start < bytes.len() {
+            let mut end = (start + chunk.max(1)).min(bytes.len());
+            while end < bytes.len() && bytes[end] & 0xc0 == 0x80 {
+                end += 1;
+            }
+            pieces.push(&bytes[start..end]);
+            start = end;
+        }
+        pieces
+    }
+
+    /// The first differing lines of two dumps, for a readable failure.
+    fn first_difference(ours: &str, reference: &str) -> String {
+        let mut out = String::new();
+        for (n, (a, b)) in ours.lines().zip(reference.lines()).enumerate() {
+            if a != b {
+                out.push_str(&format!("line {n}\n  ours: {a:.300}\n  ref : {b:.300}\n"));
+                if out.len() > 1200 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Splits at arbitrary byte offsets: escape sequences, control strings and
+    /// the parser's state after each call have to match the reference.
+    #[test]
+    fn matches_reference_on_random_ascii_output() {
+        for seed in 1..=24u64 {
+            let bytes = corpus(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 120, false);
+            compare(
+                &every_split(&bytes, bytes.len()),
+                &format!("seed {seed} whole"),
+            );
+            for chunk in [1, 2, 3, 7, 16, 64] {
+                compare(
+                    &every_split(&bytes, chunk),
+                    &format!("seed {seed} chunk {chunk}"),
+                );
+            }
+        }
+    }
+
+    /// Multi-byte text, fed in pieces that always end on a character boundary.
+    ///
+    /// Splitting *inside* a character is excluded on purpose: `vte` drops the
+    /// characters that follow such a character within the same call (it prints
+    /// only the first one and still consumes the whole valid prefix), so the
+    /// two parsers disagree there by design. `keeps_text_after_a_split_character`
+    /// pins our behaviour for that case.
+    #[test]
+    fn matches_reference_on_random_utf8_output() {
+        for seed in 1..=16u64 {
+            let bytes = corpus(seed.wrapping_mul(0x2545_f491_4f6c_dd1d), 120, true);
+            compare(
+                &char_splits(&bytes, bytes.len()),
+                &format!("seed {seed} whole"),
+            );
+            for chunk in [2, 5, 9, 40] {
+                compare(
+                    &char_splits(&bytes, chunk),
+                    &format!("seed {seed} chunk {chunk}"),
+                );
+            }
+        }
+    }
+
+    /// Parse throughput only: no PTY, no render, no locking. Run with
+    /// `cargo test -p axo-term --release --lib throughput -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reports numbers, asserts nothing"]
+    fn throughput() {
+        use std::time::Instant;
+        let pure_print: Vec<u8> = (0..4 << 20)
+            .map(|i| {
+                if i % 141 == 140 {
+                    b'\n'
+                } else {
+                    b'a' + (i % 26) as u8
+                }
+            })
+            .collect();
+        let pure_csi: Vec<u8> = (0..256 << 10)
+            .flat_map(|i: usize| {
+                format!("\x1b[{};{}H\x1b[1;3{}m", i % 28 + 1, i % 141 + 1, i % 8).into_bytes()
+            })
+            .collect();
+        // The way real styled output looks: segments written left to right,
+        // a few colours per line, like `ls --color` or a compiler.
+        let mut styled = Vec::new();
+        for line in 0..40_000 {
+            styled.extend_from_slice(b"\x1b[K");
+            for segment in 0..6 {
+                styled.extend_from_slice(
+                    format!(
+                        "\x1b[{}m",
+                        [0, 1, 32, 33, 38, 34, 36, 90][(line + segment) % 8]
+                    )
+                    .as_bytes(),
+                );
+                styled.extend_from_slice(b"segment-text-here  ");
+            }
+            styled.extend_from_slice(b"\x1b[0m\r\n");
+        }
+        for (name, bytes) in [
+            ("printable+lf", pure_print),
+            ("csi-only", pure_csi),
+            ("styled-lines", styled),
+            ("mixed-ascii", corpus(0x1234_5678_9abc_def0, 4000, false)),
+            ("mixed-utf8", corpus(0x1234_5678_9abc_def0, 4000, true)),
+        ] {
+            let reps = (64 << 20) / bytes.len().max(1);
+            let mib = (bytes.len() * reps) as f64 / (1024.0 * 1024.0);
+
+            let mut term = Term::new(141, 28, 1000);
+            let start = Instant::now();
+            for _ in 0..reps {
+                term.advance(&bytes);
+            }
+            let ours = start.elapsed().as_secs_f64();
+
+            let mut term = Term::new(141, 28, 1000);
+            let mut parser = vte::Parser::new();
+            let start = Instant::now();
+            for _ in 0..reps {
+                parser.advance(&mut Reference(&mut term), &bytes);
+            }
+            let theirs = start.elapsed().as_secs_f64();
+
+            println!(
+                "{name}: hand-written {:.1} MiB/s, vte {:.1} MiB/s, {:.2}x",
+                mib / ours,
+                mib / theirs,
+                theirs / ours
+            );
+        }
+    }
+
+    /// A character cut in half by the read boundary is not lost, and neither is
+    /// the text that follows it in the completing call.
+    #[test]
+    fn keeps_text_after_a_split_character() {
+        let (cols, rows) = (24, 8);
+        let mut term = Term::new(cols, rows, 32);
+        term.advance(b"\xc3"); // the first byte of `å` alone
+        term.advance(b"\xa5hi");
+        let mut text = String::new();
+        term.grid().row(0).text(0, cols, &mut text);
+        assert_eq!(text, "åhi");
+
+        // The same for a four-byte character split in three places.
+        let mut term = Term::new(cols, rows, 32);
+        term.advance(b"\xf0\x9f");
+        term.advance(b"\x99");
+        term.advance(b"\x82!");
+        let mut text = String::new();
+        term.grid().row(0).text(0, cols, &mut text);
+        assert_eq!(text, "🙂!");
     }
 }

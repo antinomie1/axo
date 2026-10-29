@@ -7,8 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-vte = { version = "0.15", default-features = false }
 unicode-width = "0.2"
+
+# `vte` is gone from the binary; the differential test keeps it as the
+# reference implementation the hand-written parser is checked against.
+[dev-dependencies]
+vte = { version = "0.15", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

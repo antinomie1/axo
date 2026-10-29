@@ -29,11 +29,12 @@ fn sgr_wide_chars_and_erase() {
     let mut term = Term::new(10, 3, 0);
     term.advance("\x1b[1;38;2;1;2;3m中\x1b[0mx".as_bytes());
     let row = term.grid().row(0);
-    assert!(row.cells[0].flags.has(Flags::WIDE | Flags::BOLD));
-    assert_eq!(row.cells[0].fg, Color::Rgb(1, 2, 3));
-    assert!(row.cells[1].flags.has(Flags::SPACER));
-    assert_eq!(row.cells[2].ch, 'x');
-    assert_eq!(row.cells[2].fg, Color::Default);
+    assert!(row.is_wide(0));
+    assert!(row.style_at(0).flags.has(Flags::BOLD));
+    assert_eq!(row.style_at(0).fg, Color::Rgb(1, 2, 3));
+    assert!(row.is_spacer(1));
+    assert_eq!(row.ch(2), 'x');
+    assert_eq!(row.style_at(2).fg, Color::Default);
     // Overwriting the spacer clears the wide character.
     term.advance(b"\x1b[1;2Hy");
     assert_eq!(line(&term, 0), " yx");
@@ -165,11 +166,11 @@ fn ascii_fast_path_matches_general_path() {
     // Overwriting half of a wide character with ASCII clears its partner.
     let mut term = Term::new(6, 2, 10);
     term.advance("中x".as_bytes());
-    assert!(term.grid().row(0).cells[0].flags.has(Flags::WIDE));
+    assert!(term.grid().row(0).is_wide(0));
     term.advance(b"\x1b[1;2HY");
     assert_eq!(line(&term, 0), " Yx");
-    assert!(!term.grid().row(0).cells[0].flags.has(Flags::WIDE));
-    assert!(!term.grid().row(0).cells[1].flags.has(Flags::SPACER));
+    assert!(!term.grid().row(0).is_wide(0));
+    assert!(!term.grid().row(0).is_spacer(1));
     // Insert mode still shifts the line for ASCII.
     let mut term = Term::new(6, 1, 0);
     term.advance(b"\x1b[4habc\r\x1b[1;2HZ");
@@ -178,9 +179,9 @@ fn ascii_fast_path_matches_general_path() {
     let mut term = Term::new(6, 1, 0);
     term.advance(b"\x1b[1;38;5;196mA\x1b[0mB");
     let row = term.grid().row(0);
-    assert!(row.cells[0].flags.has(Flags::BOLD));
-    assert_eq!(row.cells[0].fg, Color::Indexed(196));
-    assert_eq!(row.cells[1].fg, Color::Default);
+    assert!(row.style_at(0).flags.has(Flags::BOLD));
+    assert_eq!(row.style_at(0).fg, Color::Indexed(196));
+    assert_eq!(row.style_at(1).fg, Color::Default);
 }
 
 #[test]

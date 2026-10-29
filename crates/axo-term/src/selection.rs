@@ -1,9 +1,6 @@
 //! Text selection over screen and history lines.
 
-use crate::{
-    cell::{Flags, Row},
-    grid::Grid,
-};
+use crate::{cell::Row, grid::Grid};
 
 /// A cell position; `line` follows [`Grid::line`] indexing (negative is history).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -50,18 +47,16 @@ fn is_word(c: char) -> bool {
 }
 
 fn word_bounds(row: &Row, col: usize) -> (usize, usize) {
-    let cells = &row.cells;
-    if col >= cells.len() || !is_word(cells[col].ch) {
+    let cols = row.len();
+    if col >= cols || !is_word(row.ch(col)) {
         return (col, col);
     }
     let mut start = col;
-    while start > 0 && (is_word(cells[start - 1].ch) || cells[start - 1].flags.has(Flags::SPACER)) {
+    while start > 0 && (is_word(row.ch(start - 1)) || row.is_spacer(start - 1)) {
         start -= 1;
     }
     let mut end = col;
-    while end + 1 < cells.len()
-        && (is_word(cells[end + 1].ch) || cells[end + 1].flags.has(Flags::SPACER))
-    {
+    while end + 1 < cols && (is_word(row.ch(end + 1)) || row.is_spacer(end + 1)) {
         end += 1;
     }
     (start, end)

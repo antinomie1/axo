@@ -4,12 +4,13 @@
 mod cell;
 mod grid;
 mod input;
+mod parser;
 mod pty;
 mod selection;
 mod session;
 mod term;
 
-pub use cell::{Cell, Color, Flags, Row};
+pub use cell::{Color, Flags, Row, Style};
 pub use grid::Grid;
 pub use input::{Key, Mods, MouseAction, MouseButton, encode_key, encode_mouse};
 pub use pty::WinSize;
