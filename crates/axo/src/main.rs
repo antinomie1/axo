@@ -4,6 +4,7 @@ mod blocks;
 mod config;
 mod keys;
 mod layout;
+mod menu;
 mod shared;
 mod workspace;
 

@@ -14,6 +14,7 @@ use crate::{
     config::Config,
     keys::{self, Action, Dir},
     layout::Pane,
+    menu::MenuCommand,
     shared::{Msg, SharedRef},
 };
 
@@ -272,15 +273,34 @@ impl Workspace {
         self.focused_block().filter(|b| b.as_terminal().is_some())
     }
 
+    /// The block with `id`, in whichever tab holds it.
+    fn block(&self, id: u64) -> Option<BlockRef> {
+        self.tabs
+            .borrow()
+            .iter()
+            .find_map(|tab| tab.blocks().into_iter().find(|b| b.id() == id))
+    }
+
     fn split(&self, orientation: Orientation, kind: Kind) -> Result<()> {
-        let Some(target) = self.focused_block() else {
-            return self.new_tab();
+        match self.focused_block() {
+            Some(target) => self.split_block(target.id(), orientation, kind),
+            None => self.new_tab(),
+        }
+    }
+
+    /// Splits block `id` in its tab and focuses the new block.
+    fn split_block(&self, id: u64, orientation: Orientation, kind: Kind) -> Result<()> {
+        let Some(index) = self.tab_of_block(id) else {
+            return Ok(());
         };
+        // New terminals start in the split terminal's directory.
         let mut kind = Some(kind);
-        let mut cwd = self.cwd();
+        let mut cwd = self
+            .block(id)
+            .and_then(|b| b.as_terminal().and_then(Terminal::cwd));
         let new = {
             let mut tabs = self.tabs.borrow_mut();
-            let tab = &mut tabs[self.active.get()];
+            let tab = &mut tabs[index];
             let page = tab.page.clone();
             let mut make = |parent: &Container| {
                 self.make(
@@ -289,9 +309,11 @@ impl Workspace {
                     cwd.take(),
                 )
             };
-            tab.root.split(&page, target.id(), orientation, &mut make)?
+            tab.root.split(&page, id, orientation, &mut make)?
         };
-        if let Some(new) = new {
+        if let Some(new) = new
+            && index == self.active.get()
+        {
             self.focus_block(&new);
         }
         Ok(())
@@ -404,6 +426,11 @@ impl Workspace {
                     eprintln!("axo: {error}");
                 }
             }
+            Msg::Menu(id, command) => {
+                if let Err(error) = self.menu(id, command) {
+                    eprintln!("axo: {error}");
+                }
+            }
         }
     }
 
@@ -465,6 +492,34 @@ impl Workspace {
                     block.as_terminal().unwrap().scroll_pages(pages);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Runs a command chosen in the right-click menu of block `id`.
+    fn menu(&self, id: u64, command: MenuCommand) -> Result<()> {
+        let block = self.block(id);
+        let terminal = || block.as_ref().and_then(|b| b.as_terminal());
+        match command {
+            MenuCommand::Copy => {
+                if let Some(terminal) = terminal() {
+                    terminal.copy();
+                }
+            }
+            MenuCommand::Paste => {
+                if let Some(terminal) = terminal() {
+                    terminal.paste();
+                }
+            }
+            MenuCommand::SplitRight => {
+                self.split_block(id, Orientation::Horizontal, Kind::Terminal)?;
+            }
+            MenuCommand::SplitDown => {
+                self.split_block(id, Orientation::Vertical, Kind::Terminal)?;
+            }
+            MenuCommand::ClosePane => self.close_block(id),
+            MenuCommand::NewTab => self.new_tab()?,
+            MenuCommand::Settings => self.open_settings()?,
         }
         Ok(())
     }

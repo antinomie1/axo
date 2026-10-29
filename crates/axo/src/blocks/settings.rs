@@ -63,6 +63,9 @@ impl Settings {
         });
         settings.fill(&settings.shared.config.borrow());
 
+        let menu = crate::menu::BlockMenu::new(&settings.root, settings.id, &settings.shared, None);
+        settings.root.on_context_menu(move |_, at| menu.show_at(at));
+
         let changed = {
             let settings = Rc::downgrade(&settings);
             Rc::new(move || {

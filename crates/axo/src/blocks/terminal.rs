@@ -27,6 +27,7 @@ use axo_term::{
 use super::{Block, next_id};
 use crate::{
     config::Config,
+    menu::BlockMenu,
     shared::{Msg, SharedRef},
 };
 
@@ -40,6 +41,8 @@ struct Inner {
     session: Session,
     surface: SurfaceId,
     canvas: OnceCell<Canvas>,
+    /// The right-click menu anchored to the canvas.
+    menu: OnceCell<BlockMenu>,
     state: RefCell<State>,
 }
 
@@ -59,6 +62,9 @@ struct State {
     pending: bool,
     /// A one-shot frame callback is waiting for the next presented frame.
     scheduled: bool,
+    /// The right press of this batch already went to the application or
+    /// opened the menu; the queued context menu request must not repeat it.
+    suppress_menu: bool,
 }
 
 fn mods(m: Modifiers) -> Mods {
@@ -124,6 +130,7 @@ impl Terminal {
             session,
             surface,
             canvas: OnceCell::new(),
+            menu: OnceCell::new(),
             state: RefCell::default(),
         });
         inner.report_colors();
@@ -142,6 +149,27 @@ impl Terminal {
                 inner.input(&canvas, event);
             }
         });
+        let has_selection: Rc<dyn Fn() -> bool> = {
+            let weak = Rc::downgrade(&inner);
+            Rc::new(move || {
+                weak.upgrade()
+                    .is_some_and(|inner| inner.session.term().selection_range().is_some())
+            })
+        };
+        let menu = BlockMenu::new(&canvas, inner.id, &inner.shared, Some(has_selection));
+        // Right press, Menu key and Shift+F10 open the menu. A right press
+        // while the application reports the mouse keeps the button instead;
+        // Shift+right click overrides that in the press handler.
+        let shown = menu.clone();
+        let input = Rc::downgrade(&inner);
+        canvas.on_context_menu(move |_, at| {
+            let Some(inner) = input.upgrade() else { return };
+            let suppressed = std::mem::take(&mut inner.state.borrow_mut().suppress_menu);
+            if !suppressed {
+                shown.show_at(at);
+            }
+        });
+        let _ = inner.menu.set(menu);
         let _ = inner.canvas.set(canvas);
         Ok(Rc::new(Self { inner }))
     }
@@ -260,6 +288,10 @@ impl Terminal {
 impl Inner {
     fn canvas(&self) -> &Canvas {
         self.canvas.get().expect("set at creation")
+    }
+
+    fn menu(&self) -> &BlockMenu {
+        self.menu.get().expect("set at creation")
     }
 
     fn report_colors(&self) {
@@ -455,13 +487,27 @@ impl Inner {
                     _ => return,
                 };
                 if reporting {
-                    self.state.borrow_mut().reported |= 2;
-                    self.report(
-                        report,
-                        MouseAction::Press,
-                        self.cell_at(position),
-                        modifiers,
-                    );
+                    // Shift+right click asks for the menu even while the
+                    // application is reporting the mouse; otherwise the
+                    // button belongs to the application.
+                    if report == MouseButton::Right && modifiers.shift {
+                        let bounds = canvas.bounds();
+                        let at =
+                            Point::new(bounds.origin.x + position.x, bounds.origin.y + position.y);
+                        self.menu().show_at(at);
+                    } else {
+                        self.state.borrow_mut().reported |= 2;
+                        self.report(
+                            report,
+                            MouseAction::Press,
+                            self.cell_at(position),
+                            modifiers,
+                        );
+                    }
+                    if report == MouseButton::Right {
+                        // A context menu request follows every right press.
+                        self.state.borrow_mut().suppress_menu = true;
+                    }
                 } else if report == MouseButton::Middle {
                     canvas.request_paste();
                 }

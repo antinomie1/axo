@@ -8,7 +8,7 @@ use std::{
 use aegle::app::UiProxy;
 use axo_render::{Palette, Renderer};
 
-use crate::{config::Config, keys::Action};
+use crate::{config::Config, keys::Action, menu::MenuCommand};
 
 /// Messages routed to the UI thread outside any window or UI borrow.
 #[derive(Clone, Copy, Debug)]
@@ -19,6 +19,8 @@ pub enum Msg {
     Exit(u64),
     /// An application shortcut matched in `on_key`.
     Action(Action),
+    /// A command chosen in block `id`'s right-click menu.
+    Menu(u64, MenuCommand),
 }
 
 pub struct Shared {

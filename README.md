@@ -5,6 +5,7 @@
 ## 特性与架构
 
 - **顶部标签页 + 任意分屏块树**：每个标签页维护一棵分屏树（内部节点为 `aegle::Splitter`，叶子节点为 `Block`），同一标签页内可混合放置多个终端块与 aegle UI 块。
+- **块右键菜单**：在终端或设置块上右键（`Menu` 键、`Shift+F10` 亦可）弹出 aegle 菜单，含复制/粘贴、向右/向下分屏、关闭块、新建标签页与设置；应用程序占用右键时按住 `Shift` 可强制打开。
 - **Vulkan（ash）终端渲染 + 渲染器接口解耦**：
   - `axo_render::Renderer` trait 抽象表面生命周期、字体度量、终端帧渲染与场景合成；上层块只依赖该接口，可接入 wgpu / CPU 等其他渲染器而不更改调用方 API。
   - `VulkanRenderer` 复用 `aegle` 的共享 Vulkan 设备与图形队列（`App::vulkan()`），通过构建期 `naga` 编译的 SPIR-V 着色器、按需填充的共享字形图集与单次实例化绘制（背景连续 run 合并 + 字形 + 光标/选区/装饰线）渲染到离屏 `R8G8B8A8_SRGB` 纹理，并以 `TextureId` 零拷贝合成进 aegle 帧。
@@ -22,7 +23,7 @@
 | --- | --- |
 | `crates/axo-term` | PTY（`openpty`/`fork`/`TIOCSWINSZ`）、VT 状态机（`vte`）、主/备屏与环形回滚、选区、键盘与鼠标协议编码 |
 | `crates/axo-render` | `Renderer` trait、后端无关图元布局（`quads`）、字形与框线栅格化（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`） |
-| `crates/axo` | 配置读写、分屏树（`layout`）、块接口与实现（`blocks::terminal`、`blocks::settings`）、标签页工作区与快捷键 |
+| `crates/axo` | 配置读写、分屏树（`layout`）、块右键菜单（`menu`）、块接口与实现（`blocks::terminal`、`blocks::settings`）、标签页工作区与快捷键 |
 
 ## 构建与运行
 
@@ -55,6 +56,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | 复制选区 / 粘贴剪贴板（支持中键粘贴与括号粘贴 `2004`） |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 放大 / 缩小 / 重置字号 |
 | `Shift+PageUp` / `Shift+PageDown` | 翻页滚动历史回滚区（亦支持鼠标滚轮） |
+
+## 右键菜单
+
+在终端或设置块上按右键（`Menu` 键、`Shift+F10` 亦可）打开块菜单，执行与快捷键相同的命令：`Copy`、`Paste`（终端且有选区时可用）、`Split Right`、`Split Down`、`Close Pane`、`New Tab`、`Settings`，每项右侧标注对应快捷键。应用程序通过鼠标协议占用右键时（vim、htop 等），右键照旧上报给程序，按住 `Shift` 再右键可强制打开菜单。
 
 ## 配置文件
 
