@@ -439,21 +439,32 @@ impl Inner {
     /// deletion offsets are ignored because the terminal publishes no
     /// surrounding excerpt, so nothing outside the composition is addressable.
     fn compose(&self, ime: CanvasIme) {
-        {
+        let shown = {
             let mut state = self.state.borrow_mut();
-            state.preedit = match ime.preedit.is_empty() {
+            let previous = state.preedit.take();
+            let next = match ime.preedit.is_empty() {
                 true => None,
                 false => Some(Preedit {
                     text: ime.preedit,
                     cursor: ime.cursor,
                 }),
             };
-        }
+            let shown = previous
+                .as_ref()
+                .map(|preedit| (&preedit.text, preedit.cursor))
+                != next.as_ref().map(|preedit| (&preedit.text, preedit.cursor));
+            state.preedit = next;
+            shown
+        };
         if let Some(commit) = ime.commit {
             // Committed text is the child's input, exactly like typing.
             self.session.write(commit.into_bytes());
         }
-        self.canvas().invalidate();
+        // A transaction that changes no visible text needs no frame; repainting
+        // for it would let an input method's acknowledgements drive the loop.
+        if shown {
+            self.canvas().invalidate();
+        }
     }
 
     fn report_colors(&self) {

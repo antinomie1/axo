@@ -85,7 +85,8 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] `cargo build --release`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`
 - [x] 实机运行（含 Khronos Vulkan Validation Layer）：shell、vim（备用屏）、CJK/真彩色/框线、多分屏、多标签页、设置页与窗口透明
 - [x] 空闲 CPU 为 0（10s 空闲 0 CPU tick，无逐帧回调）
-- [x] 与 Alacritty 0.17 同条件对比（DSR 同步吞吐）：ASCII 157.8 vs 140.8 MiB/s、SGR 168.8 vs 193.4、CJK 160.5 vs 163.5、备用屏 TUI 163.4 vs 162.2 MiB/s；启动 64 vs 114 ms
+- [x] 与 Alacritty 0.17 同条件对比（DSR 同步吞吐，2026-10 复测，输入法已接入）：ASCII 161.4 vs 140.7 MiB/s、SGR 185.6 vs 184.8、CJK 169.2 vs 167.1、备用屏 TUI 174.9 vs 171.5 MiB/s；启动 64.1 vs 114.1 ms；空闲 CPU 0 ticks/5s vs 7；PSS 58.8 vs 39.0 MiB、线程 7 vs 16
+  - 复测时发现并修掉了一个真实回归：输入法在每次宿主状态变化后都会回一个空 `done`，把它当成 update 上报会让宿主再发一遍状态，两者以事件循环速率互相触发（实测洪水输出时 ~500 次/秒 text-input 事务），吞吐因此腰斩到 68.7 MiB/s；忽略"只确认状态"的空批次（仅当它结束合成时才上报）后回到 162.7 MiB/s，同时终端侧不再为空事务重绘
 
 ## 平台支持
 

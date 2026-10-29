@@ -15,9 +15,9 @@ axo-render = { path = "crates/axo-render" }
 # feature themselves: Vulkan (which also hosts the terminal's ash pipeline) on
 # Linux and Windows, the software compositor on macOS, whose GPU backend is not
 # wired up yet.
-aegle = { git = "https://github.com/antinomie1/aegle", rev = "db437299ab7fdc1c005826f2526345d079b2e87e", default-features = false, features = ["desktop"] }
-aegle-glyph = { git = "https://github.com/antinomie1/aegle", rev = "db437299ab7fdc1c005826f2526345d079b2e87e", features = ["scene"] }
-aegle-text = { git = "https://github.com/antinomie1/aegle", rev = "db437299ab7fdc1c005826f2526345d079b2e87e", features = ["scene"] }
+aegle = { git = "https://github.com/antinomie1/aegle", rev = "385e02faea1dece8517bc43333887508c6320dd1", default-features = false, features = ["desktop"] }
+aegle-glyph = { git = "https://github.com/antinomie1/aegle", rev = "385e02faea1dece8517bc43333887508c6320dd1", features = ["scene"] }
+aegle-text = { git = "https://github.com/antinomie1/aegle", rev = "385e02faea1dece8517bc43333887508c6320dd1", features = ["scene"] }
 
 [profile.release]
 opt-level = 3
