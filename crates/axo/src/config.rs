@@ -376,6 +376,12 @@ impl Config {
         };
         Color::rgba(r, g, b, alpha)
     }
+
+    /// The inactive tab's hover fill: a subtle tint matching the chrome controls.
+    pub fn tab_hover(&self) -> Color {
+        let [r, g, b] = self.palette().foreground;
+        Color::rgba(r, g, b, 15)
+    }
 }
 
 #[cfg(test)]
@@ -438,5 +444,16 @@ mod tests {
         assert_eq!(config.theme(true).background.to_rgba()[3], 128);
         assert_eq!(config.bar_color(true).to_rgba()[3], 128);
         assert_eq!(config.theme(false).background.to_rgba()[3], 255);
+    }
+
+    #[test]
+    fn tab_fills_and_hover_derive_from_palette() {
+        let config = Config::default();
+        let fill = config.tab_fill();
+        let hover = config.tab_hover();
+        let [_, _, _, fill_alpha] = fill.to_rgba();
+        let [_, _, _, hover_alpha] = hover.to_rgba();
+        assert!(fill_alpha > 0);
+        assert_eq!(hover_alpha, 15);
     }
 }

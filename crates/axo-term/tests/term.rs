@@ -364,3 +364,269 @@ fn graphics_are_reported_to_applications() {
     assert_eq!(ask(b"\x1b[16t"), "\x1b[6;20;10t");
     assert_eq!(ask(b"\x1b[18t"), "\x1b[8;24;80t");
 }
+
+/// A small deterministic generator: xorshift64*, so failures reproduce.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn below(&mut self, n: u64) -> usize {
+        (self.next() % n) as usize
+    }
+    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len() as u64)]
+    }
+}
+
+/// One random piece of terminal output.
+fn fragment(rng: &mut Rng, out: &mut Vec<u8>, utf8: bool) {
+    const CSI_FINALS: &[u8] = b"ABCDEFGHIJKLMNOPSTXZ@`abcdeghlmnpqrstu";
+    const COLORS: &[&str] = &[
+        "38;5;196",
+        "48;5;21",
+        "38;2;255;128;0",
+        "48;2;1;2;3",
+        "38:2::9:8:7",
+        "38:5:33",
+        "58;5;9",
+        "38;2;1;2",
+        "48:2::1:2:3",
+    ];
+    match rng.below(100) {
+        0..=34 => {
+            let len = 1 + rng.below(40);
+            for _ in 0..len {
+                out.push(b' ' + rng.below(95) as u8);
+            }
+        }
+        35..=44 if utf8 => {
+            out.extend_from_slice(rng.pick(&[
+                "héllo".as_bytes(),
+                "日本語".as_bytes(),
+                "│─└┐".as_bytes(),
+                "🙂".as_bytes(),
+                "✓".as_bytes(),
+                "æøå".as_bytes(),
+                "\u{80}\u{9b}".as_bytes(),
+            ]));
+        }
+        35..=44 => {
+            out.extend_from_slice(b"\x1b(0lqk\x1b(B");
+        }
+        45..=57 => {
+            out.push(*rng.pick(b"\n\r\t\x08\x0e\x0f\x07\x00\x18\x1a\x7f"));
+        }
+        58..=80 => {
+            out.extend_from_slice(b"\x1b[");
+            let parts = rng.below(4) + 1;
+            for i in 0..parts {
+                if i > 0 {
+                    out.push(b';');
+                }
+                match rng.below(10) {
+                    0..=3 => out.extend_from_slice(rng.pick(COLORS).as_bytes()),
+                    4 => out.extend_from_slice(b"4:3"),
+                    5 => out.extend_from_slice(b"38;5"),
+                    _ => {
+                        let codes: [&[u8]; 10] = [
+                            b"0", b"1", b"2", b"4", b"7", b"22", b"39", b"49", b"90", b"100",
+                        ];
+                        out.extend_from_slice(codes[rng.below(10)]);
+                    }
+                }
+            }
+            out.push(b'm');
+        }
+        81..=92 => {
+            out.extend_from_slice(b"\x1b[");
+            if rng.below(4) == 0 {
+                out.push(*rng.pick(b"?<>"));
+            }
+            let parts = rng.below(3);
+            for i in 0..parts {
+                if i > 0 {
+                    out.push(b';');
+                }
+                let values: [&[u8]; 10] = [
+                    b"1", b"2", b"3", b"5", b"10", b"24", b"80", b"1049", b"1000", b"2004",
+                ];
+                out.extend_from_slice(values[rng.below(10)]);
+            }
+            out.push(*rng.pick(CSI_FINALS));
+        }
+        93..=97 => {
+            let payload = *rng.pick(&[
+                "0;title",
+                "2;a b;c",
+                "7;file://host/tmp/x%20y",
+                "10;?",
+                "11;?",
+                "0;",
+                "52;c;YWJj",
+                "9;notify;hi",
+                "133;A",
+            ]);
+            out.extend_from_slice(b"\x1b]");
+            out.extend_from_slice(payload.as_bytes());
+            out.extend_from_slice(if rng.below(2) == 0 {
+                b"\x07"
+            } else {
+                b"\x1b\\"
+            });
+        }
+        98 => {
+            out.push(0x1b);
+            if rng.below(2) == 0 {
+                out.push(*rng.pick(b"()#"));
+            }
+            out.push(*rng.pick(b"78DEHMc=>\\*"));
+        }
+        _ => {
+            out.extend_from_slice(rng.pick(&[
+                b"\x1bP1$r0m\x1b\\".as_slice(),
+                b"\x1bP>|axo\x1b\\".as_slice(),
+                b"\x1bX junk \x1b\\".as_slice(),
+                b"\x1b^pm\x07".as_slice(),
+                b"\x1b_apc\x1b\\".as_slice(),
+                b"\x1bPq#0;2;0;0;0\x1b\\".as_slice(),
+            ]));
+        }
+    }
+}
+
+/// Generates `count` fragments into one byte stream.
+fn corpus(seed: u64, count: usize, utf8: bool) -> Vec<u8> {
+    let mut rng = Rng(seed);
+    let mut out = Vec::new();
+    for _ in 0..count {
+        fragment(&mut rng, &mut out, utf8);
+    }
+    out
+}
+
+/// Splits at character boundaries: a multi-byte character is never cut.
+fn char_splits(bytes: &[u8], chunk: usize) -> Vec<&[u8]> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = (start + chunk.max(1)).min(bytes.len());
+        while end < bytes.len() && bytes[end] & 0xc0 == 0x80 {
+            end += 1;
+        }
+        pieces.push(&bytes[start..end]);
+        start = end;
+    }
+    pieces
+}
+
+#[test]
+fn parses_random_ascii_output() {
+    for seed in 1..=24u64 {
+        let bytes = corpus(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 120, false);
+        let mut term = Term::new(24, 8, 32);
+        for piece in bytes.chunks(bytes.len().max(1)) {
+            term.advance(piece);
+        }
+        for chunk in [1, 2, 3, 7, 16, 64] {
+            let mut term = Term::new(24, 8, 32);
+            for piece in bytes.chunks(chunk) {
+                term.advance(piece);
+            }
+        }
+    }
+}
+
+#[test]
+fn parses_random_utf8_output() {
+    for seed in 1..=16u64 {
+        let bytes = corpus(seed.wrapping_mul(0x2545_f491_4f6c_dd1d), 120, true);
+        let mut term = Term::new(24, 8, 32);
+        for piece in char_splits(&bytes, bytes.len()) {
+            term.advance(piece);
+        }
+        for chunk in [2, 5, 9, 40] {
+            let mut term = Term::new(24, 8, 32);
+            for piece in char_splits(&bytes, chunk) {
+                term.advance(piece);
+            }
+        }
+    }
+}
+
+#[test]
+fn keeps_text_after_a_split_character() {
+    let (cols, rows) = (24, 8);
+    let mut term = Term::new(cols, rows, 32);
+    term.advance(b"\xc3"); // the first byte of `å` alone
+    term.advance(b"\xa5hi");
+    let mut text = String::new();
+    term.grid().row(0).text(0, cols, &mut text);
+    assert_eq!(text, "åhi");
+
+    let mut term = Term::new(cols, rows, 32);
+    term.advance(b"\xf0\x9f");
+    term.advance(b"\x99");
+    term.advance(b"\x82!");
+    let mut text = String::new();
+    term.grid().row(0).text(0, cols, &mut text);
+    assert_eq!(text, "🙂!");
+}
+
+#[test]
+#[ignore = "reports numbers, asserts nothing"]
+fn throughput() {
+    use std::time::Instant;
+    let pure_print: Vec<u8> = (0..4 << 20)
+        .map(|i| {
+            if i % 141 == 140 {
+                b'\n'
+            } else {
+                b'a' + (i % 26) as u8
+            }
+        })
+        .collect();
+    let pure_csi: Vec<u8> = (0..256 << 10)
+        .flat_map(|i: usize| {
+            format!("\x1b[{};{}H\x1b[1;3{}m", i % 28 + 1, i % 141 + 1, i % 8).into_bytes()
+        })
+        .collect();
+    let mut styled = Vec::new();
+    for line in 0..40_000 {
+        styled.extend_from_slice(b"\x1b[K");
+        for segment in 0..6 {
+            styled.extend_from_slice(
+                format!(
+                    "\x1b[{}m",
+                    [0, 1, 32, 33, 38, 34, 36, 90][(line + segment) % 8]
+                )
+                .as_bytes(),
+            );
+            styled.extend_from_slice(b"segment-text-here  ");
+        }
+        styled.extend_from_slice(b"\x1b[0m\r\n");
+    }
+    for (name, bytes) in [
+        ("printable+lf", pure_print),
+        ("csi-only", pure_csi),
+        ("styled-lines", styled),
+        ("mixed-ascii", corpus(0x1234_5678_9abc_def0, 4000, false)),
+        ("mixed-utf8", corpus(0x1234_5678_9abc_def0, 4000, true)),
+    ] {
+        let reps = (64 << 20) / bytes.len().max(1);
+        let mib = (bytes.len() * reps) as f64 / (1024.0 * 1024.0);
+
+        let mut term = Term::new(141, 28, 1000);
+        let start = Instant::now();
+        for _ in 0..reps {
+            term.advance(&bytes);
+        }
+        let ours = start.elapsed().as_secs_f64();
+
+        println!("{name}: {:.1} MiB/s", mib / ours);
+    }
+}

@@ -1,8 +1,8 @@
 //! A VT parser: the ANSI state machine with a bulk printable run
 //! fast path, inline UTF-8 and allocation-free parameters.
 //!
-//! The parser is a byte-at-a-time state machine (Paul Williams' VT500 diagram,
-//! the one `vte` implements), with three departures that matter for speed:
+//! The parser is a byte-at-a-time state machine (Paul Williams' VT500 diagram),
+//! with three departures that matter for speed:
 //!
 //! * In the ground state the common case is a run of printable ASCII, which the
 //!   parser hands to [`Term::print_run`] as one slice. That loop writes cells
@@ -16,8 +16,8 @@
 
 use crate::{sixel::Decoder, term::Term};
 
-/// Parameter groups one CSI sequence may carry. `vte` stops at the same point,
-/// ignoring the sequence once it overflows.
+/// Parameter groups one CSI sequence may carry, ignoring the sequence once
+/// it overflows.
 pub(crate) const MAX_GROUPS: usize = 32;
 /// Size of the flat value pool shared by `;` groups and `:` sub-parameters.
 const MAX_VALUES: usize = 96;
@@ -144,6 +144,18 @@ impl Params {
         }
     }
 
+    /// Number of `;`-separated groups.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.groups as usize
+    }
+
+    /// Whether any parameters were provided.
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.groups == 0
+    }
+
     /// The first value of group `i`, or `0` when absent.
     #[inline]
     pub(crate) fn raw(&self, i: usize) -> u16 {
@@ -153,56 +165,14 @@ impl Params {
             0
         }
     }
-}
 
-/// The parameter list a terminal needs from a CSI sequence: the interface
-/// `vte`'s list and this parser's own are both read through.
-pub(crate) trait ParamSource {
-    /// Number of `;`-separated groups.
-    fn len(&self) -> usize;
-    /// The values of group `i`, empty past the end.
-    fn group(&self, i: usize) -> &[u16];
-    /// The first value of group `i`, or `0` when absent.
-    fn raw(&self, i: usize) -> u16;
     /// Parameter `i`, where zero and absence both mean `default`.
     #[inline]
-    fn get(&self, i: usize, default: usize) -> usize {
+    pub(crate) fn get(&self, i: usize, default: usize) -> usize {
         match self.raw(i) {
             0 => default,
             value => value as usize,
         }
-    }
-    #[inline]
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-impl ParamSource for Params {
-    #[inline]
-    fn len(&self) -> usize {
-        self.groups as usize
-    }
-    #[inline]
-    fn group(&self, i: usize) -> &[u16] {
-        Params::group(self, i)
-    }
-    #[inline]
-    fn raw(&self, i: usize) -> u16 {
-        Params::raw(self, i)
-    }
-}
-
-#[cfg(test)]
-impl ParamSource for vte::Params {
-    fn len(&self) -> usize {
-        self.iter().count()
-    }
-    fn group(&self, i: usize) -> &[u16] {
-        self.iter().nth(i).unwrap_or(&[])
-    }
-    fn raw(&self, i: usize) -> u16 {
-        self.group(i).first().copied().unwrap_or(0)
     }
 }
 
@@ -305,7 +275,7 @@ impl Parser {
                 i + 1
             }
             // C0 controls, and single bytes that are not valid UTF-8 but name a
-            // C1 control: executed, exactly as `vte` does.
+            // C1 control: executed.
             0x00..=0x1f | 0x80..=0x9f => {
                 term.execute(bytes[i]);
                 i + 1

@@ -50,6 +50,7 @@ pub struct Workspace {
     pages: Container,
     tabs: RefCell<Vec<Tab>>,
     active: Cell<usize>,
+    hovered_tab: Cell<Option<usize>>,
     /// The window title last set, so output frames do not resend it.
     window_title: RefCell<String>,
     shared: SharedRef,
@@ -78,6 +79,7 @@ impl Workspace {
             pages,
             tabs: RefCell::new(Vec::new()),
             active: Cell::new(0),
+            hovered_tab: Cell::new(None),
             window_title: RefCell::new(String::new()),
             shared,
         });
@@ -87,7 +89,33 @@ impl Workspace {
             .window
             .ui()
             .on_key(move |event| ws.upgrade().is_some_and(|ws| ws.key(&event)));
+        let ws = workspace.this.clone();
+        workspace.window.on_input_capture(move |_, event| {
+            if let Some(ws) = ws.upgrade()
+                && let InputKind::Pointer { kind, position, .. } = event.kind
+            {
+                match kind {
+                    PointerKind::Leave | PointerKind::Cancel => {
+                        ws.update_tab_hover(None);
+                    }
+                    _ => {
+                        ws.update_tab_hover(Some(position));
+                    }
+                }
+            }
+        });
         workspace
+    }
+
+    fn update_tab_hover(&self, pos: Option<Point>) {
+        let new_hovered = pos.and_then(|p| {
+            let tabs = self.tabs.borrow();
+            tabs.iter().position(|tab| tab.item.bounds().contains(p))
+        });
+        if self.hovered_tab.get() != new_hovered {
+            self.hovered_tab.set(new_hovered);
+            self.style_tabs();
+        }
     }
 
     fn rc(&self) -> Rc<Self> {
@@ -158,7 +186,7 @@ impl Workspace {
         title.set_height(24.0);
         title.set_padding(2.5);
         title.set_font_size(13.0);
-        title.set_skin(Some(chrome::quiet));
+        title.set_skin(Some(chrome::tab_quiet));
         let close = item.button("×");
         close.set_tooltip("Close tab");
         close.set_accessible_label("Close tab");
@@ -253,17 +281,27 @@ impl Workspace {
     fn style_tabs(&self) {
         let tabs = self.tabs.borrow();
         let active = self.active.get();
+        let hovered = self.hovered_tab.get();
         let fill = self.shared.config.borrow().tab_fill();
+        let hover_bg = self.shared.config.borrow().tab_hover();
         let show_close = tabs.len() > 1;
         for (i, tab) in tabs.iter().enumerate() {
             let selected = i == active;
-            let skin = if selected {
-                chrome::active
-            } else {
-                chrome::quiet
+            let is_hovered = !selected && hovered == Some(i);
+            let skin = match (selected, is_hovered) {
+                (true, _) => chrome::active,
+                (false, true) => chrome::tab_hovered,
+                (false, false) => chrome::tab_quiet,
             };
             tab.title.set_skin(Some(skin));
-            tab.item.set_background(selected.then_some(fill));
+            let bg = if selected {
+                Some(fill)
+            } else if is_hovered {
+                Some(hover_bg)
+            } else {
+                None
+            };
+            tab.item.set_background(bg);
             tab.close.set_visible(show_close);
         }
     }
@@ -277,6 +315,13 @@ impl Workspace {
         }
         tab.item.remove();
         tab.page.remove();
+        if let Some(hovered) = self.hovered_tab.get() {
+            if hovered == index {
+                self.hovered_tab.set(None);
+            } else if hovered > index {
+                self.hovered_tab.set(Some(hovered - 1));
+            }
+        }
         let len = self.tabs.borrow().len();
         (len > 0).then(|| index.min(len - 1))
     }
@@ -732,6 +777,10 @@ pub fn start(workspace: &Rc<Workspace>, add: &Button, settings: &Button) -> Resu
         button.set_height(24.0);
         button.set_font_size(14.0);
     }
+    add.decorate(chrome::PlusIcon);
+    settings.decorate(chrome::GearIcon);
+    add.set_accessible_label("New tab");
+    settings.set_accessible_label("Settings");
     let ws = workspace.clone();
     add.on_click(move |_| ws.run(Action::NewTab));
     let ws = workspace.clone();

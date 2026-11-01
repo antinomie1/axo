@@ -17,9 +17,11 @@ aegle.workspace = true
 unicode-width = "0.2"
 
 # The renderer aegle itself presents with, and therefore the one the terminal
-# draws into. Only the target's row applies, so no other platform's backend is
-# compiled in.
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+# draws into. On Linux, aegle's default window backend is sdl3.
+[target.'cfg(target_os = "linux")'.dependencies]
+aegle = { workspace = true, features = ["vulkan", "sdl3"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 aegle = { workspace = true, features = ["vulkan"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

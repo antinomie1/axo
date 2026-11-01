@@ -12,8 +12,8 @@ Window {
         gap: 2dp
         align: center
         Row { id: tabs; gap: 2dp; grow: 1; basis: 0dp; align: center }
-        Button { id: add; text: "+"; tooltip: "New tab (Ctrl+Shift+T)" }
-        Button { id: settings; text: "⚙"; tooltip: "Settings (Ctrl+,)" }
+        Button { id: add; text: ""; tooltip: "New tab (Ctrl+Shift+T)" }
+        Button { id: settings; text: ""; tooltip: "Settings (Ctrl+,)" }
     }
     Column { id: pages; grow: 1; basis: 0dp; gap: 0dp }
 }
