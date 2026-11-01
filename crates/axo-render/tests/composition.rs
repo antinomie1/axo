@@ -1,7 +1,8 @@
 //! Uncommitted composition hides the cells it covers, is underlined, and moves
 //! the caret into itself, so the candidate window anchors where the text is.
+//! Images are laid out into layers around the text, following their lines.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use axo_render::{
     CellSize, Frame, Preedit,
@@ -9,7 +10,7 @@ use axo_render::{
     palette::KITTY,
     quads::{self, AtlasGlyph, GlyphSource, MASK, SOLID},
 };
-use axo_term::{CursorShape, Term};
+use axo_term::{CursorShape, Pixels, Term};
 
 /// Records the characters asked for, so a test can see which cells drew.
 struct Probe(Rc<RefCell<Vec<char>>>);
@@ -23,6 +24,10 @@ impl GlyphSource for Probe {
             top: 0,
             color: false,
         })
+    }
+
+    fn image(&mut self, pixels: &Arc<Pixels>) -> Option<u64> {
+        Some(pixels.width.into())
     }
 }
 
@@ -127,4 +132,55 @@ fn a_caret_at_the_end_follows_the_last_character() {
         .collect();
     assert_eq!(cursor.len(), 1);
     assert_eq!(cursor[0][0], 32.0, "two wide characters, four columns");
+}
+
+/// Places a transparent `size`-pixels-square kitty image at the cursor.
+fn image(term: &mut Term, size: usize, z: i32) {
+    let group = "AAAA".repeat(size * size * 4 / 3 + 1);
+    term.advance(format!("\x1b_Ga=T,f=32,s={size},v={size},z={z},C=1;{group}\x1b\\").as_bytes());
+}
+
+#[test]
+fn images_sort_into_layers_around_the_text() {
+    let mut term = Term::new(6, 4, 0);
+    term.set_cell_size(8, 16);
+    image(&mut term, 1, 5);
+    image(&mut term, 2, -1);
+    image(&mut term, 3, i32::MIN);
+    image(&mut term, 4, 0);
+    term.advance(b"text");
+    let (out, _) = build(&term, None);
+    let [below, under, over] = out.layers();
+    assert_eq!(below.len(), 1);
+    assert_eq!(below[0].texture, 3);
+    assert_eq!(under[0].texture, 2);
+    assert_eq!(
+        over.iter().map(|image| image.texture).collect::<Vec<_>>(),
+        [4, 1]
+    );
+    // Instances are written in drawing order: backgrounds after the lowest
+    // layer, text after the middle one.
+    let order: Vec<u32> = out.iter().map(|quad| quad.kind).collect();
+    assert_eq!(order.len(), out.len());
+    assert_eq!(*order.last().unwrap(), SOLID, "images end the list");
+    assert!(order[..order.len() - 2].contains(&MASK));
+}
+
+#[test]
+fn images_follow_the_view_and_are_culled_outside_it() {
+    let mut term = Term::new(6, 2, 10);
+    term.set_cell_size(8, 16);
+    term.advance(b"\x1b[2;2H");
+    image(&mut term, 4, 0);
+    let rect = |term: &Term| {
+        let (out, _) = build(term, None);
+        out.images.first().map(|image| image.quad.rect)
+    };
+    assert_eq!(rect(&term), Some([8.0, 16.0, 4.0, 4.0]));
+    // Two lines up, it has left the screen...
+    term.advance(b"\n\n");
+    assert_eq!(rect(&term), None);
+    // ...and scrolling back brings it to where those lines are shown.
+    term.scroll_display(1);
+    assert_eq!(rect(&term), Some([8.0, 0.0, 4.0, 4.0]));
 }

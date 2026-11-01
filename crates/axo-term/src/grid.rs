@@ -2,7 +2,14 @@
 
 use std::collections::VecDeque;
 
-use crate::cell::{Row, Style};
+use crate::{
+    cell::{Row, Style},
+    image::Images,
+};
+
+/// Lines evicted between checks for images that left with them, less one: a
+/// mask, since this is on the path of every scrolled line.
+const PRUNE_MASK: i64 = 0xff;
 
 /// The visible lines of one screen and, for the primary screen, its history.
 ///
@@ -15,6 +22,13 @@ pub struct Grid {
     rows: usize,
     ring: VecDeque<Row>,
     max_history: usize,
+    /// Lines dropped from the front of the ring since the start. Adding a
+    /// ring index gives a line a number that never changes, whatever scrolls
+    /// past it, which is what images anchor to.
+    evicted: i64,
+    /// Boxed: this and everything like it stays off the cache lines that
+    /// every sequence reads.
+    pub(crate) images: Box<Images>,
 }
 
 impl Grid {
@@ -29,6 +43,8 @@ impl Grid {
             rows,
             ring,
             max_history,
+            evicted: 0,
+            images: Box::default(),
         }
     }
 
@@ -43,6 +59,39 @@ impl Grid {
     #[inline]
     pub fn history_len(&self) -> usize {
         self.ring.len() - self.rows
+    }
+
+    /// The absolute number of the line at the top of the screen.
+    #[inline]
+    pub fn base(&self) -> i64 {
+        self.evicted + self.history_len() as i64
+    }
+
+    /// The images of this screen, placed in absolute lines.
+    #[inline]
+    pub fn images(&self) -> &Images {
+        &self.images
+    }
+
+    /// Text is about to replace the cells `from..to` of screen line `y`.
+    #[inline]
+    pub(crate) fn punch(&mut self, y: usize, from: usize, to: usize) {
+        if self.images.has_sixels() {
+            self.punch_sixels(y, from, to);
+        }
+    }
+
+    #[cold]
+    fn punch_sixels(&mut self, y: usize, from: usize, to: usize) {
+        let line = self.base() + y as i64;
+        self.images.punch(line, from, to.min(self.cols));
+    }
+
+    /// Drops the `n` oldest lines of the ring.
+    fn evict(&mut self, n: usize) {
+        self.ring.drain(..n);
+        self.evicted += n as i64;
+        self.images.prune(self.evicted);
     }
 
     #[inline]
@@ -84,6 +133,10 @@ impl Grid {
                 let fresh = if self.history_len() >= self.max_history {
                     let mut row = self.ring.pop_front().expect("history is full");
                     row.reset(self.cols, template);
+                    self.evicted += 1;
+                    if self.evicted & PRUNE_MASK == 0 && !self.images.is_empty() {
+                        self.images.prune(self.evicted);
+                    }
                     row
                 } else {
                     Row::new(self.cols, template)
@@ -93,6 +146,9 @@ impl Grid {
                 } else {
                     let at = (self.ring.len() - self.rows) + bottom + 1;
                     self.ring.insert(at, fresh);
+                    // The ring grew in the middle: lines under the region have
+                    // new numbers, while the ones above it keep theirs.
+                    self.images.shift_below(self.evicted + at as i64, 1);
                 }
             }
             return n;
@@ -103,7 +159,17 @@ impl Grid {
             row.reset(self.cols, template);
             self.ring.insert(base + bottom, row);
         }
+        self.scroll_images(top, bottom, -(n as i64));
         0
+    }
+
+    #[inline]
+    fn scroll_images(&mut self, top: usize, bottom: usize, delta: i64) {
+        if !self.images.is_empty() {
+            let base = self.base();
+            self.images
+                .scroll(base + top as i64, base + bottom as i64, delta);
+        }
     }
 
     /// Scrolls `top..=bottom` down by `n`, blanking the freed top lines.
@@ -115,11 +181,11 @@ impl Grid {
             row.reset(self.cols, template);
             self.ring.insert(base + top, row);
         }
+        self.scroll_images(top, bottom, n as i64);
     }
 
     pub fn clear_history(&mut self) {
-        let hist = self.history_len();
-        self.ring.drain(..hist);
+        self.evict(self.history_len());
         self.ring.shrink_to_fit();
     }
 
@@ -127,7 +193,7 @@ impl Grid {
         self.max_history = max;
         let extra = self.history_len().saturating_sub(max);
         if extra > 0 {
-            self.ring.drain(..extra);
+            self.evict(extra);
         }
     }
 
@@ -156,7 +222,7 @@ impl Grid {
             self.rows = rows;
             let drop_hist = self.history_len().saturating_sub(self.max_history);
             if drop_hist > 0 {
-                self.ring.drain(..drop_hist);
+                self.evict(drop_hist);
             }
             cursor = cursor.saturating_sub(extra);
         }

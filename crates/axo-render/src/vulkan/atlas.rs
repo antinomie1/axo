@@ -1,17 +1,20 @@
 //! The glyph atlases shared by every terminal surface: a coverage page
 //! (`R8_UNORM`) and a color page (`R8G8B8A8_UNORM`), each shelf-packed, filled
-//! on demand and uploaded in its own submission ahead of the surfaces that
-//! sample it.
+//! on demand and uploaded through a [`Transfer`].
 //!
 //! Coverage glyphs are by far the common case, so keeping them in an `R8` page
 //! costs a quarter of the bytes an `RGBA8` atlas spent on the same pixels, and
 //! halves the upload traffic for the first paint of a character.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use aegle::app::ash::vk;
+use axo_term::Pixels;
 
-use super::gpu::{Buffer, Gpu, Image, barrier};
+use super::{
+    gpu::{Gpu, Image, Transfer, Upload, barrier, region, to_shader},
+    textures::Textures,
+};
 use crate::{
     Result,
     glyphs::{Bitmap, GlyphKey, Glyphs},
@@ -47,7 +50,6 @@ struct Page {
     /// Pixels queued since the last submission, and where they go.
     bytes: Vec<u8>,
     regions: Vec<vk::BufferImageCopy>,
-    staging: Option<Buffer>,
 }
 
 impl Page {
@@ -63,56 +65,25 @@ impl Page {
             shelf: (0, 0, 0),
             bytes: Vec::new(),
             regions: Vec::new(),
-            staging: None,
         })
     }
 
     /// Queues `bitmap` at `(x, y)`; the caller keeps the region inside the page.
     fn queue(&mut self, bitmap: &Bitmap, x: u32, y: u32) {
-        self.regions.push(
-            vk::BufferImageCopy::default()
-                .buffer_offset(self.bytes.len() as u64)
-                .image_subresource(vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .image_offset(vk::Offset3D {
-                    x: x as i32,
-                    y: y as i32,
-                    z: 0,
-                })
-                .image_extent(vk::Extent3D {
-                    width: bitmap.width,
-                    height: bitmap.height,
-                    depth: 1,
-                }),
-        );
+        let offset = self.bytes.len() as u64;
+        self.regions
+            .push(region(offset, x, y, bitmap.width, bitmap.height));
         self.bytes.extend_from_slice(&bitmap.data);
     }
 
-    /// Keeps the staging buffer at the queued size and writes this page's pixels.
-    fn prepare(&mut self, gpu: &Gpu) -> Result {
-        let needed = self.bytes.len() as u64;
-        if self
-            .staging
-            .as_ref()
-            .is_none_or(|staging| staging.size < needed)
-        {
-            if let Some(old) = self.staging.take() {
-                // SAFETY: the atlas fence was waited, retiring the last upload.
-                unsafe { old.destroy(&gpu.device) };
-            }
-            self.staging = Some(gpu.buffer(
-                needed.next_power_of_two().max(1 << 16),
-                vk::BufferUsageFlags::TRANSFER_SRC,
-            )?);
+    /// This page's queued pixels, as an upload.
+    fn upload(&self) -> Upload<'_> {
+        Upload {
+            image: self.image.image,
+            fresh: false,
+            bytes: &self.bytes,
+            regions: &self.regions,
         }
-        let staging = self.staging.as_ref().unwrap();
-        staging.write(0, &self.bytes);
-        self.bytes.clear();
-        Ok(())
     }
 
     /// Forgets every glyph; their texels are overwritten by later uploads.
@@ -129,8 +100,7 @@ pub struct Atlas {
     mask: Page,
     color: Page,
     map: HashMap<GlyphKey, Option<AtlasGlyph>>,
-    command: vk::CommandBuffer,
-    fence: vk::Fence,
+    transfer: Transfer,
     /// A glyph did not fit; the caller resets and lays out again.
     pub full: bool,
 }
@@ -144,23 +114,12 @@ impl Atlas {
         let color_side = (side / 2).max(512).min(side);
         let color = Page::new(gpu, color_side, vk::Format::R8G8B8A8_UNORM)?;
         let device = &gpu.device;
-        // SAFETY: one command buffer from the renderer's pool, recorded and
-        // submitted on this thread; the clear finishes before `new` returns.
-        let command = unsafe {
-            device.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )?[0]
-        };
-        let fence = gpu.fence(false)?;
+        let transfer = Transfer::new(gpu, pool)?;
+        transfer.begin(gpu)?;
+        let command = transfer.command;
+        // SAFETY: recording between `begin` and `end`; the clear finishes before
+        // `new` returns.
         unsafe {
-            device.begin_command_buffer(
-                command,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
             for page in [&mask, &color] {
                 let to_transfer = barrier(
                     page.image.image,
@@ -186,20 +145,18 @@ impl Atlas {
                     &vk::ClearColorValue::default(),
                     &[super::gpu::COLOR_RANGE],
                 );
-                Self::to_shader(device, command, page.image.image);
+                to_shader(device, command, page.image.image);
             }
-            device.end_command_buffer(command)?;
         }
-        gpu.submit(command, fence)?;
+        transfer.end(gpu)?;
         // Waiting without a reset leaves the fence signaled, as `flush` expects when idle.
         // SAFETY: the fence belongs to this device.
-        unsafe { gpu.device.wait_for_fences(&[fence], true, u64::MAX)? };
+        unsafe { device.wait_for_fences(&[transfer.fence], true, u64::MAX)? };
         Ok(Self {
             mask,
             color,
             map: HashMap::new(),
-            command,
-            fence,
+            transfer,
             full: false,
         })
     }
@@ -212,32 +169,6 @@ impl Atlas {
     /// The color page sampled for color glyphs (`R8G8B8A8_UNORM`).
     pub fn color_view(&self) -> vk::ImageView {
         self.color.image.view
-    }
-
-    fn to_shader(device: &aegle::app::ash::Device, command: vk::CommandBuffer, image: vk::Image) {
-        let to_shader = barrier(
-            image,
-            (
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::AccessFlags::TRANSFER_WRITE,
-            ),
-            (
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::AccessFlags::SHADER_READ,
-            ),
-        );
-        // SAFETY: recording into a command buffer in the recording state.
-        unsafe {
-            device.cmd_pipeline_barrier(
-                command,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[to_shader],
-            );
-        }
     }
 
     /// Forgets every glyph; their texels are overwritten by later uploads.
@@ -273,62 +204,14 @@ impl Atlas {
         })
     }
 
-    /// Uploads glyphs added since the last flush, in a submission ordered before
-    /// the surfaces that sample them.
+    /// Uploads glyphs added since the last flush.
     pub fn flush(&mut self, gpu: &Gpu) -> Result {
-        if self.mask.regions.is_empty() && self.color.regions.is_empty() {
-            return Ok(());
+        self.transfer
+            .upload(gpu, &[self.mask.upload(), self.color.upload()])?;
+        for page in [&mut self.mask, &mut self.color] {
+            page.bytes.clear();
+            page.regions.clear();
         }
-        let device = &gpu.device;
-        gpu.wait(self.fence)?;
-        self.mask.prepare(gpu)?;
-        self.color.prepare(gpu)?;
-        // SAFETY: the command buffer is idle (fence waited) and records on this thread.
-        unsafe {
-            device.begin_command_buffer(
-                self.command,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            for page in [&self.mask, &self.color] {
-                if page.regions.is_empty() {
-                    continue;
-                }
-                // Earlier surface renders sampling the page finish before it is written.
-                let to_transfer = barrier(
-                    page.image.image,
-                    (
-                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        vk::AccessFlags::SHADER_READ,
-                    ),
-                    (
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        vk::AccessFlags::TRANSFER_WRITE,
-                    ),
-                );
-                device.cmd_pipeline_barrier(
-                    self.command,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[to_transfer],
-                );
-                device.cmd_copy_buffer_to_image(
-                    self.command,
-                    page.staging.as_ref().unwrap().buffer,
-                    page.image.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &page.regions,
-                );
-                Self::to_shader(device, self.command, page.image.image);
-            }
-            device.end_command_buffer(self.command)?;
-        }
-        gpu.submit(self.command, self.fence)?;
-        self.mask.regions.clear();
-        self.color.regions.clear();
         Ok(())
     }
 
@@ -337,14 +220,10 @@ impl Atlas {
     pub unsafe fn destroy(&mut self, gpu: &Gpu, pool: vk::CommandPool) {
         // SAFETY: forwarded to the caller.
         unsafe {
-            for page in [&mut self.mask, &mut self.color] {
-                if let Some(staging) = page.staging.take() {
-                    staging.destroy(&gpu.device);
-                }
+            self.transfer.destroy(gpu, pool);
+            for page in [&self.mask, &self.color] {
                 page.image.destroy(&gpu.device);
             }
-            gpu.device.destroy_fence(self.fence, None);
-            gpu.device.free_command_buffers(pool, &[self.command]);
         }
     }
 }
@@ -353,6 +232,8 @@ impl Atlas {
 pub struct Source<'a> {
     pub atlas: &'a mut Atlas,
     pub glyphs: &'a mut Glyphs,
+    pub images: &'a mut Textures,
+    pub gpu: &'a Gpu,
 }
 
 impl GlyphSource for Source<'_> {
@@ -366,6 +247,10 @@ impl GlyphSource for Source<'_> {
             self.atlas.map.insert(key, entry);
         }
         entry
+    }
+
+    fn image(&mut self, pixels: &Arc<Pixels>) -> Option<u64> {
+        self.images.get(self.gpu, pixels)
     }
 }
 

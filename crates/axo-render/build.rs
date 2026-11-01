@@ -39,6 +39,7 @@ fn compile() {
     for (suffix, shader_stage, entry_point) in [
         ("vert", ShaderStage::Vertex, "vs_main"),
         ("frag", ShaderStage::Fragment, "fs_main"),
+        ("image", ShaderStage::Fragment, "fs_image"),
     ] {
         let words = spv::write_vec(
             &module,

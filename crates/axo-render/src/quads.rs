@@ -1,6 +1,8 @@
 //! Backend-neutral layout of a terminal frame into colored and textured quads.
 
-use axo_term::{CursorShape, Flags};
+use std::sync::Arc;
+
+use axo_term::{CursorShape, Flags, Pixels};
 use unicode_width::UnicodeWidthChar;
 
 use crate::{CellSize, Frame, Preedit, Rgb, glyphs::GlyphKey};
@@ -9,13 +11,17 @@ pub const SOLID: u32 = 0;
 pub const MASK: u32 = 1;
 pub const COLOR: u32 = 2;
 
+/// Images below this z draw under cell backgrounds; the rest of the negative
+/// range draws over backgrounds and under text. Both are kitty's layers.
+pub const BELOW_BACKGROUND: i32 = i32::MIN / 2;
+
 /// One instanced quad, the GPU vertex layout: 32 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Quad {
     /// x, y, width, height in device pixels.
     pub rect: [f32; 4],
-    /// Atlas texel rectangle x, y, width, height for glyph kinds.
+    /// Texel rectangle x, y, width, height for glyphs and images.
     pub uv: [u16; 4],
     /// Straight sRGB RGBA.
     pub color: [u8; 4],
@@ -32,27 +38,62 @@ pub struct AtlasGlyph {
     pub color: bool,
 }
 
-/// A renderer's glyph cache, rasterizing on a miss.
+/// A renderer's glyph and image caches, filling on a miss.
 pub trait GlyphSource {
     fn glyph(&mut self, key: GlyphKey) -> Option<AtlasGlyph>;
+    /// A handle the renderer draws `pixels` with, in whatever form it keeps
+    /// them; `None` skips the image.
+    fn image(&mut self, _pixels: &Arc<Pixels>) -> Option<u64> {
+        None
+    }
 }
 
-/// Reused quad lists: backgrounds draw first, then glyphs and decorations.
+/// An image to draw: one textured quad.
+#[derive(Clone, Copy, Debug)]
+pub struct ImageQuad {
+    pub quad: Quad,
+    /// The handle from [`GlyphSource::image`].
+    pub texture: u64,
+    pub z: i32,
+}
+
+/// Reused quad lists. Backgrounds draw first, then glyphs and decorations, with
+/// images in three layers around them.
 #[derive(Default)]
 pub struct Quads {
     pub background: Vec<Quad>,
     pub foreground: Vec<Quad>,
+    /// Sorted by z; older images first within one z.
+    pub images: Vec<ImageQuad>,
 }
 
 impl Quads {
     pub fn len(&self) -> usize {
-        self.background.len() + self.foreground.len()
+        self.background.len() + self.foreground.len() + self.images.len()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// The images under backgrounds, between backgrounds and text, and over text.
+    pub fn layers(&self) -> [&[ImageQuad]; 3] {
+        let (under, over) = self
+            .images
+            .split_at(self.images.partition_point(|image| image.z < 0));
+        let (below, under) =
+            under.split_at(under.partition_point(|image| image.z < BELOW_BACKGROUND));
+        [below, under, over]
+    }
+    /// Every quad in drawing order, which is the order instances are written.
     pub fn iter(&self) -> impl Iterator<Item = &Quad> {
-        self.background.iter().chain(&self.foreground)
+        fn quads(images: &[ImageQuad]) -> impl Iterator<Item = &Quad> {
+            images.iter().map(|image| &image.quad)
+        }
+        let [below, under, over] = self.layers();
+        quads(below)
+            .chain(&self.background)
+            .chain(quads(under))
+            .chain(&self.foreground)
+            .chain(quads(over))
     }
 }
 
@@ -119,11 +160,49 @@ fn width(ch: char) -> usize {
     ch.width().unwrap_or(1).clamp(1, 2)
 }
 
+/// Lays out the visible images, in pixels and pixel-aligned so that an image at
+/// its natural size maps texels to pixels one to one.
+fn images(frame: &Frame<'_>, cell: CellSize, source: &mut dyn GlyphSource, out: &mut Quads) {
+    let term = frame.term;
+    let grid = term.grid();
+    let view = grid.base() - term.display_offset() as i64;
+    let pad = i64::from(frame.padding);
+    let bottom = term.rows() as i64 * i64::from(cell.height);
+    for placement in grid.images().iter() {
+        let [width, height] = placement.size([cell.width, cell.height]);
+        let y = (placement.line - view) * i64::from(cell.height) + i64::from(placement.offset[1]);
+        if y + i64::from(height) <= 0 || y >= bottom {
+            continue;
+        }
+        let x = placement.col as i64 * i64::from(cell.width) + i64::from(placement.offset[0]);
+        let Some(texture) = source.image(&placement.pixels) else {
+            continue;
+        };
+        out.images.push(ImageQuad {
+            quad: Quad {
+                rect: [
+                    (pad + x) as f32,
+                    (pad + y) as f32,
+                    width as f32,
+                    height as f32,
+                ],
+                uv: placement.crop.map(|side| side as u16),
+                color: [255; 4],
+                kind: SOLID,
+            },
+            texture,
+            z: placement.z,
+        });
+    }
+    out.images.sort_by_key(|image| image.z);
+}
+
 /// Lays out `frame`; the default background stays transparent so the window
 /// background (and its opacity) shows through.
 pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, out: &mut Quads) {
     out.background.clear();
     out.foreground.clear();
+    out.images.clear();
     let term = frame.term;
     let palette = frame.palette;
     let grid = term.grid();
@@ -153,6 +232,9 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
     let block = frame.focused && shape == CursorShape::Block;
     let cursor_span = overlay.as_ref().map_or(1, Overlay::caret_span);
     let line_width = (ch / 16.0).round().max(1.0);
+    if !grid.images().is_empty() {
+        images(frame, cell, glyphs, out);
+    }
 
     for y in 0..rows {
         let line = term.view_line(y);

@@ -1,12 +1,17 @@
 //! The terminal state machine: VT sequences applied to two screens.
 
+use std::sync::Arc;
+
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
     cell::{Color, Flags, Style},
     grid::Grid,
+    image::{Images, MAX_SIDE, Pixels, Placement},
+    kitty::Pending,
     parser::{ParamSource, Parser},
     selection::{Point, Range, Selection},
+    sixel::{self, Decoder},
 };
 
 /// Which mouse events the application asked for.
@@ -45,6 +50,10 @@ pub struct Modes {
     pub mouse_sgr: bool,
     /// Wheel sends arrow keys on the alternate screen (1007).
     pub alternate_scroll: bool,
+    /// A sixel draws from the top left and scrolls nothing (DECSDM, 80).
+    pub sixel_display: bool,
+    /// The cursor ends beside a sixel instead of below it (8452).
+    pub sixel_cursor_right: bool,
 }
 
 impl Default for Modes {
@@ -61,6 +70,8 @@ impl Default for Modes {
             mouse: MouseMode::Off,
             mouse_sgr: false,
             alternate_scroll: true,
+            sixel_display: false,
+            sixel_cursor_right: false,
         }
     }
 }
@@ -118,6 +129,8 @@ pub struct Term {
     pub report_colors: [[u8; 3]; 2],
     scrollback: usize,
     parser: Parser,
+    /// The kitty graphics transfer still receiving chunks.
+    pub(crate) kitty: Option<Box<Pending>>,
 }
 
 /// The local path of an OSC 7 `file://host/path` URI, percent-decoded, or
@@ -208,13 +221,14 @@ impl Term {
             report_colors: [[0xdd; 3], [0x00; 3]],
             scrollback,
             parser: Parser::new(),
+            kitty: None,
         }
     }
 
     /// Applies output bytes from the child process.
     pub fn advance(&mut self, bytes: &[u8]) {
         // The parser needs `&mut self` for the terminal it drives, so it is
-        // moved out for the call; it owns no allocation and is small.
+        // moved out for the call; the default left behind allocates nothing.
         let mut parser = std::mem::take(&mut self.parser);
         parser.advance(self, bytes);
         self.parser = parser;
@@ -245,9 +259,9 @@ impl Term {
             }
             let (start, y) = (self.cursor.x, self.cursor.y);
             let len = (cols - start).min(run.len() - i);
-            self.grid_mut()
-                .row_mut(y)
-                .write_ascii(start, &run[i..i + len], pen);
+            let grid = self.grid_mut();
+            grid.punch(y, start, start + len);
+            grid.row_mut(y).write_ascii(start, &run[i..i + len], pen);
             let end = start + len;
             i += len;
             if end >= cols {
@@ -283,6 +297,24 @@ impl Term {
     }
     pub fn alt_screen(&self) -> bool {
         self.alt_active
+    }
+
+    /// Tells the terminal the cell size in pixels, which the graphics
+    /// protocols and pixel size reports are measured in.
+    pub fn set_cell_size(&mut self, width: u32, height: u32) {
+        if width != 0 && height != 0 {
+            self.primary.images.set_cell([width, height]);
+            self.alt.images.set_cell([width, height]);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn images(&self) -> &Images {
+        self.grid().images()
+    }
+    #[inline]
+    pub(crate) fn images_mut(&mut self) -> &mut Images {
+        &mut self.grid_mut().images
     }
 
     /// Bytes the terminal answers with (status reports); written back to the child.
@@ -426,7 +458,9 @@ impl Term {
     /// Blanks `from..to` on line `y`, also clearing wide characters cut in half.
     fn clear_cells(&mut self, y: usize, from: usize, to: usize) {
         let pen = self.cursor.pen;
-        self.grid_mut().row_mut(y).clear(from, to, &pen);
+        let grid = self.grid_mut();
+        grid.punch(y, from, to);
+        grid.row_mut(y).clear(from, to, &pen);
     }
 
     fn goto(&mut self, x: usize, y: usize) {
@@ -473,6 +507,7 @@ impl Term {
             self.alt_active = true;
             self.saved[1] = self.saved[0];
             if clear {
+                self.alt.images.clear();
                 let rows = self.rows();
                 for y in 0..rows {
                     self.clear_cells(y, 0, usize::MAX);
@@ -492,10 +527,12 @@ impl Term {
     fn reset(&mut self) {
         let fresh = Term::new(self.cols(), self.rows(), self.scrollback);
         let report_colors = self.report_colors;
+        let [width, height] = self.images().cell();
         *self = Term {
             report_colors,
             ..fresh
         };
+        self.set_cell_size(width, height);
     }
 
     fn print_char(&mut self, c: char) {
@@ -512,7 +549,9 @@ impl Term {
             }
             let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols());
             let pen = self.cursor.pen;
-            self.grid_mut().row_mut(y).write_ascii(x, &[c as u8], pen);
+            let grid = self.grid_mut();
+            grid.punch(y, x, x + 1);
+            grid.row_mut(y).write_ascii(x, &[c as u8], pen);
             if x + 1 >= cols {
                 self.cursor.wrap_next = true;
             } else {
@@ -546,9 +585,11 @@ impl Term {
             self.linefeed();
         }
         let (x, y) = (self.cursor.x, self.cursor.y);
-        let pen = self.cursor.pen;
-        if self.modes.insert {
-            self.grid_mut().row_mut(y).insert_cells(x, width, &pen);
+        let (pen, insert) = (self.cursor.pen, self.modes.insert);
+        let grid = self.grid_mut();
+        grid.punch(y, x, if insert { cols } else { x + width });
+        if insert {
+            grid.row_mut(y).insert_cells(x, width, &pen);
         }
         // The row blanks a wide character the character overlaps.
         self.grid_mut().row_mut(y).write_char(x, c, width, pen);
@@ -643,6 +684,7 @@ impl Term {
             }
             7 => self.modes.autowrap = on,
             25 => self.modes.show_cursor = on,
+            80 => self.modes.sixel_display = on,
             47 => self.set_alt_screen(on, false),
             1047 => self.set_alt_screen(on, true),
             1048 => match on {
@@ -663,12 +705,103 @@ impl Term {
             1006 => self.modes.mouse_sgr = on,
             1007 => self.modes.alternate_scroll = on,
             2004 => self.modes.bracketed_paste = on,
+            8452 => self.modes.sixel_cursor_right = on,
             _ => {}
         }
     }
 
-    fn respond(&mut self, bytes: impl AsRef<[u8]>) {
+    pub(crate) fn respond(&mut self, bytes: impl AsRef<[u8]>) {
         self.responses.extend_from_slice(bytes.as_ref());
+    }
+
+    /// Moves the cursor past an image that starts at it: to the right of its
+    /// last row, scrolling when that row is below the screen.
+    pub(crate) fn pass_image(&mut self, cols: usize, rows: usize) {
+        let x = self.cursor.x + cols;
+        for _ in 1..rows {
+            self.linefeed();
+        }
+        if x < self.cols() {
+            self.cursor.x = x;
+        } else {
+            self.cursor.x = 0;
+            self.linefeed();
+        }
+    }
+
+    /// A decoder for a sixel image starting now. Unpainted pixels show the
+    /// default background, which the palette reports here, unless transparent.
+    pub(crate) fn sixel_decoder(&self, transparent: bool) -> Box<Decoder> {
+        let [r, g, b] = self.report_colors[1];
+        let alpha = if transparent { 0 } else { 255 };
+        Decoder::new(u32::from_ne_bytes([r, g, b, alpha]))
+    }
+
+    /// Shows a finished sixel image. It is cell content: at the cursor, moving
+    /// the cursor below itself, unless display mode pins it to the top left.
+    pub(crate) fn sixel(&mut self, pixels: Pixels) {
+        let display = self.modes.sixel_display;
+        let (col, y) = match display {
+            true => (0, 0),
+            false => (self.cursor.x, self.cursor.y),
+        };
+        let line = self.grid().base() + y as i64;
+        let placement = Placement::whole(Arc::new(pixels), line, col);
+        let [cols, rows] = placement.span(self.images().cell());
+        self.images_mut().add_sixel(placement);
+        if display {
+            return;
+        }
+        if self.modes.sixel_cursor_right {
+            self.pass_image(cols, rows);
+        } else {
+            for _ in 0..rows {
+                self.linefeed();
+            }
+            self.cursor.x = col;
+        }
+    }
+
+    /// `ED 2`: what was on the screen goes; what scrolled off stays. Images
+    /// stay out of line here and below: `csi` is hot, and this is not.
+    #[cold]
+    fn clear_visible_images(&mut self) {
+        let (base, cell) = (self.grid().base(), self.images().cell());
+        let on_screen = |placement: &Placement| placement.reaches(base, cell);
+        self.images_mut().delete(on_screen, false, |_| false);
+    }
+
+    /// Answers `XTSMGRAPHICS`: every attribute is read-only here, so a request
+    /// to set one reports the value it stays at.
+    #[cold]
+    fn graphics_attribute(&mut self, item: u16) {
+        let [cell_width, cell_height] = self.images().cell();
+        let geometry = |cells: usize, cell: u32| (cells * cell as usize).min(MAX_SIDE);
+        let reply = match item {
+            1 => format!("\x1b[?1;0;{}S", sixel::REGISTERS),
+            2 => format!(
+                "\x1b[?2;0;{};{}S",
+                geometry(self.cols(), cell_width),
+                geometry(self.rows(), cell_height)
+            ),
+            // ReGIS, and anything else: not there.
+            _ => format!("\x1b[?{item};1;0S"),
+        };
+        self.respond(reply);
+    }
+
+    /// Answers the `XTWINOPS` size reports: text area in pixels, cell in
+    /// pixels, text area in cells.
+    #[cold]
+    fn report_size(&mut self, kind: u16) {
+        let (cols, rows) = (self.cols(), self.rows());
+        let [width, height] = self.images().cell().map(|v| v as usize);
+        match kind {
+            14 => self.respond(format!("\x1b[4;{};{}t", rows * height, cols * width)),
+            16 => self.respond(format!("\x1b[6;{height};{width}t")),
+            18 => self.respond(format!("\x1b[8;{rows};{cols}t")),
+            _ => {}
+        }
     }
 }
 
@@ -733,7 +866,9 @@ impl Term {
             (b'@', []) => {
                 let n = params.get(0, 1).min(cols - x);
                 let pen = self.cursor.pen;
-                self.grid_mut().row_mut(y).insert_cells(x, n, &pen);
+                let grid = self.grid_mut();
+                grid.punch(y, x, cols);
+                grid.row_mut(y).insert_cells(x, n, &pen);
             }
             (b'A', []) => {
                 let top = if y >= self.top { self.top } else { 0 };
@@ -792,6 +927,7 @@ impl Term {
                         self.clear_cells(y, 0, x + 1);
                     }
                     2 => {
+                        self.clear_visible_images();
                         for line in 0..rows {
                             self.clear_cells(line, 0, cols);
                         }
@@ -827,9 +963,12 @@ impl Term {
             (b'P', []) => {
                 let n = params.get(0, 1).min(cols - x);
                 let pen = self.cursor.pen;
-                self.grid_mut().row_mut(y).remove_cells(x, n, &pen);
+                let grid = self.grid_mut();
+                grid.punch(y, x, cols);
+                grid.row_mut(y).remove_cells(x, n, &pen);
             }
             (b'S', []) => self.scroll_up_region(self.top, params.get(0, 1)),
+            (b'S', [b'?']) => self.graphics_attribute(params.raw(0)),
             (b'T', []) => {
                 let (top, bottom, template) = (self.top, self.bottom, self.cursor.pen);
                 self.grid_mut()
@@ -856,7 +995,8 @@ impl Term {
                     }
                 }
             }
-            (b'c', []) => self.respond(b"\x1b[?6c"),
+            // A VT220 with sixel graphics and ANSI color.
+            (b'c', []) => self.respond(b"\x1b[?62;4;22c"),
             (b'c', [b'>']) => self.respond(b"\x1b[>1;10;0c"),
             (b'd', []) => self.goto_row(params.get(0, 1) - 1),
             (b'g', []) => match params.raw(0) {
@@ -909,7 +1049,7 @@ impl Term {
             }
             (b's', []) => self.save_cursor(),
             (b'u', []) => self.restore_cursor(),
-            (b't', []) if params.raw(0) == 18 => self.respond(format!("\x1b[8;{rows};{cols}t")),
+            (b't', []) => self.report_size(params.raw(0)),
             _ => {}
         }
     }

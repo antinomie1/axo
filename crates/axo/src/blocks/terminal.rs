@@ -52,6 +52,9 @@ struct Inner {
 #[derive(Default)]
 struct State {
     grid: (u16, u16),
+    /// The cell size the child was last told, which a font change alters
+    /// without moving the grid.
+    cell: (u32, u32),
     focused: bool,
     selecting: bool,
     /// The last cell a drag reached, to skip redundant redraws.
@@ -494,13 +497,18 @@ impl Inner {
         );
         let focused = {
             let mut state = self.state.borrow_mut();
-            if state.grid != grid {
+            let size = (cell.width, cell.height);
+            if state.grid != grid || state.cell != size {
                 state.grid = grid;
+                state.cell = size;
+                // The cell area alone: a client divides this by the grid to
+                // size its images, so the padding must not be part of it.
+                let pixels = |cells: u16, cell: u32| (u32::from(cells) * cell).min(u16::MAX.into());
                 self.session.resize(WinSize {
                     cols: grid.0,
                     rows: grid.1,
-                    width: px[0].min(u16::MAX as u32) as u16,
-                    height: px[1].min(u16::MAX as u32) as u16,
+                    width: pixels(grid.0, cell.width) as u16,
+                    height: pixels(grid.1, cell.height) as u16,
                 });
             }
             state.focused

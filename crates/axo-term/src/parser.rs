@@ -10,11 +10,11 @@
 //!   call, one width lookup and two grid indexes per character.
 //! * Parameters live in fixed arrays owned by the parser, so a CSI sequence
 //!   allocates nothing and dispatch reads them in place.
-//! * DCS and the SOS/PM/APC strings are skipped without interpreting them: the
-//!   terminal has no action for their contents, so the bytes are consumed until
-//!   the string terminator.
+//! * Image strings are long, so sixel and kitty graphics data are taken in bulk
+//!   as well. Every other DCS and SOS/PM/APC string is skipped without
+//!   interpreting it: the bytes are consumed until the string terminator.
 
-use crate::term::Term;
+use crate::{sixel::Decoder, term::Term};
 
 /// Parameter groups one CSI sequence may carry. `vte` stops at the same point,
 /// ignoring the sequence once it overflows.
@@ -25,6 +25,11 @@ const MAX_VALUES: usize = 96;
 const MAX_INTERMEDIATES: usize = 2;
 /// Longest OSC payload kept: titles and directories are far shorter.
 const OSC_CAP: usize = 8 * 1024;
+/// Longest graphics command kept: clients chunk at 4 KiB, but a few send one
+/// image unchunked, and 64 MiB of base64 is a 4K frame and then some.
+const APC_CAP: usize = 64 << 20;
+/// Capacity kept between graphics commands, enough for a run of chunks.
+const APC_KEEP: usize = 64 * 1024;
 
 const REPLACEMENT: char = '\u{fffd}';
 
@@ -211,6 +216,12 @@ enum State {
     CsiIntermediate,
     CsiIgnore,
     OscString,
+    /// The parameters of a `DCS`, up to the byte that names the string.
+    DcsEntry,
+    /// Sixel data, decoded in bulk.
+    Sixel,
+    /// An `APC` string, kept in bulk if it turns out to be a graphics command.
+    Apc,
     /// `DCS` and the `SOS`/`PM`/`APC` strings: consumed without interpretation.
     String,
 }
@@ -225,6 +236,10 @@ pub(crate) struct Parser {
     osc: Vec<u8>,
     /// The OSC payload outgrew its buffer; the sequence is dropped.
     osc_overflow: bool,
+    /// The sixel image in progress.
+    sixel: Option<Box<Decoder>>,
+    /// The graphics command in progress.
+    apc: Vec<u8>,
     /// Leading bytes of a UTF-8 character split across two calls.
     partial: [u8; 4],
     partial_len: u8,
@@ -240,6 +255,8 @@ impl Default for Parser {
             ignoring: false,
             osc: Vec::new(),
             osc_overflow: false,
+            sixel: None,
+            apc: Vec::new(),
             partial: [0; 4],
             partial_len: 0,
         }
@@ -261,9 +278,7 @@ impl Parser {
             if self.state == State::Ground {
                 i += self.ground(term, &bytes[i..]);
             } else {
-                let byte = bytes[i];
-                i += 1;
-                self.step(term, byte);
+                i += self.step(term, &bytes[i..]);
             }
         }
     }
@@ -360,7 +375,10 @@ impl Parser {
         take
     }
 
-    fn step(&mut self, term: &mut Term, byte: u8) {
+    /// One byte of a sequence, or as much of an image string as there is.
+    /// Returns how many bytes were consumed.
+    fn step(&mut self, term: &mut Term, bytes: &[u8]) -> usize {
+        let byte = bytes[0];
         match self.state {
             State::Escape => self.escape(term, byte),
             State::EscapeIntermediate => self.escape_intermediate(term, byte),
@@ -369,9 +387,13 @@ impl Parser {
             State::CsiIntermediate => self.csi_intermediate(term, byte),
             State::CsiIgnore => self.csi_ignore(term, byte),
             State::OscString => self.osc_string(term, byte),
+            State::DcsEntry => self.dcs_entry(term, byte),
             State::String => self.ignore_string(term, byte),
+            State::Sixel => return self.sixel(term, bytes),
+            State::Apc => return self.apc(term, bytes),
             State::Ground => unreachable!(),
         }
+        1
     }
 
     #[inline]
@@ -397,9 +419,10 @@ impl Parser {
             }
             0x50 => {
                 self.reset();
-                self.state = State::String; // DCS
+                self.state = State::DcsEntry;
             }
-            0x58 | 0x5e | 0x5f => self.state = State::String, // SOS, PM, APC
+            0x58 | 0x5e => self.state = State::String, // SOS, PM
+            0x5f => self.state = State::Apc,
             0x5b => {
                 self.reset();
                 self.state = State::CsiEntry;
@@ -549,19 +572,95 @@ impl Parser {
         self.state = State::Ground;
     }
 
+    /// The header of a DCS: `q` makes it sixel data, any other final byte a
+    /// string the terminal has no action for.
+    #[inline(never)]
+    fn dcs_entry(&mut self, term: &mut Term, byte: u8) {
+        match byte {
+            0x18 | 0x1a | 0x1b | 0x9c => {
+                self.end_string(term, byte);
+            }
+            0x30..=0x39 => self.params.digit(byte),
+            0x3b => self.params.next_group(),
+            b'q' if self.inter_len == 0 => {
+                self.params.finish();
+                // `P2` asks for unpainted pixels to stay transparent.
+                self.sixel = Some(term.sixel_decoder(self.params.raw(1) == 1));
+                self.state = State::Sixel;
+            }
+            0x40..=0x7e => self.state = State::String,
+            _ => self.collect(byte),
+        }
+    }
+
+    /// Sixel data up to the terminator. Returns how many bytes were consumed.
+    #[inline(never)]
+    fn sixel(&mut self, term: &mut Term, bytes: &[u8]) -> usize {
+        let decoder = self.sixel.as_mut().expect("the state implies a decoder");
+        let end = decoder.feed(bytes);
+        if end == bytes.len() {
+            return end;
+        }
+        let decoder = self.sixel.take().expect("the state implies a decoder");
+        if self.end_string(term, bytes[end])
+            && let Some(pixels) = decoder.finish()
+        {
+            term.sixel(pixels);
+        }
+        end + 1
+    }
+
+    /// An APC string: its first byte tells a graphics command, gathered until
+    /// the terminator, from anything else. Returns how many bytes were consumed.
+    #[inline(never)]
+    fn apc(&mut self, term: &mut Term, bytes: &[u8]) -> usize {
+        let end = bytes
+            .iter()
+            .position(|byte| is_string_end(*byte))
+            .unwrap_or(bytes.len());
+        let foreign = self.apc.is_empty() && end != 0 && bytes[0] != b'G';
+        if foreign || self.apc.len() + end > APC_CAP {
+            self.apc = Vec::new();
+            self.state = State::String;
+            return 0;
+        }
+        self.apc.extend_from_slice(&bytes[..end]);
+        if end == bytes.len() {
+            return end;
+        }
+        if self.end_string(term, bytes[end]) && !self.apc.is_empty() {
+            term.kitty(&self.apc[1..]);
+        }
+        self.apc.clear();
+        self.apc.shrink_to(APC_KEEP);
+        end + 1
+    }
+
     /// DCS and the other string sequences: nothing inside is interpreted.
     fn ignore_string(&mut self, term: &mut Term, byte: u8) {
+        if is_string_end(byte) {
+            self.end_string(term, byte);
+        }
+    }
+
+    /// Leaves a string on a byte [`is_string_end`] accepts. True when the
+    /// string is complete, false when `CAN` or `SUB` cancelled it.
+    fn end_string(&mut self, term: &mut Term, byte: u8) -> bool {
         match byte {
             0x18 | 0x1a => {
                 term.execute(byte);
                 self.state = State::Ground;
+                false
             }
             0x1b => {
                 self.reset();
                 self.state = State::Escape;
+                true
             }
-            0x9c => self.state = State::Ground,
-            _ => {}
+            _ => {
+                self.state = State::Ground;
+                true
+            }
         }
     }
 
@@ -590,6 +689,12 @@ impl Parser {
             self.ignoring = true;
         }
     }
+}
+
+/// Whether `byte` ends a string: `CAN`, `SUB`, `ESC` or a C1 `ST`.
+#[inline]
+fn is_string_end(byte: u8) -> bool {
+    matches!(byte, 0x18 | 0x1a | 0x1b | 0x9c)
 }
 
 /// A decoded character is a C1 control when it falls in `0x80..=0x9f`.

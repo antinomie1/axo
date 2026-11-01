@@ -132,7 +132,14 @@ impl Session {
     }
 
     pub fn resize(&self, size: WinSize) {
-        self.term().resize(size.cols as usize, size.rows as usize);
+        {
+            let mut term = self.term();
+            term.resize(size.cols as usize, size.rows as usize);
+            term.set_cell_size(
+                u32::from(size.width) / u32::from(size.cols).max(1),
+                u32::from(size.height) / u32::from(size.rows).max(1),
+            );
+        }
         let _ = self.console.resize(size);
     }
 

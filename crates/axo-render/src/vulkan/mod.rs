@@ -4,20 +4,26 @@
 //! submits one command buffer on aegle's queue before aegle's own frame, so the
 //! frame that samples the texture sees the finished image. Render pass
 //! dependencies order the write after earlier frames' reads and make it visible
-//! to later fragment shaders; the atlas upload has its own earlier submission.
+//! to later fragment shaders; atlas and image uploads have their own earlier
+//! submissions.
 #![allow(unsafe_code)]
 
 mod atlas;
 mod gpu;
+mod textures;
 
 use aegle::{
-    app::{SharedDevice, ash::vk},
+    app::{
+        SharedDevice,
+        ash::vk::{self, Handle},
+    },
     ui::scene::{Rect, SceneBuilder, TextureId},
 };
 
 use self::{
     atlas::{Atlas, Source},
     gpu::{Buffer, Gpu, Image},
+    textures::Textures,
 };
 use crate::{
     CellSize, FontSpec, Frame, Renderer, Result, SurfaceId,
@@ -48,9 +54,13 @@ pub struct VulkanRenderer {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// The same quads, sampling an image (set 1) instead of the atlas pages.
+    image_pipeline: vk::Pipeline,
+    sampler: vk::Sampler,
     descriptors: vk::DescriptorPool,
     set: vk::DescriptorSet,
     atlas: Atlas,
+    images: Textures,
     glyphs: Glyphs,
     cell: CellSize,
     surfaces: Vec<Option<Surface>>,
@@ -129,7 +139,19 @@ impl VulkanRenderer {
                 None,
             )?;
 
-            // Binding 0 is the coverage page (R8), binding 1 the color page.
+            let sampler = device.create_sampler(
+                &vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+                None,
+            )?;
+            let samplers = [sampler];
+            // Binding 0 is the coverage page (R8), binding 1 the color page,
+            // binding 2 the fixed sampler images use.
             let bindings = [
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(0)
@@ -141,22 +163,44 @@ impl VulkanRenderer {
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                    .immutable_samplers(&samplers),
             ];
             let set_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
                 None,
             )?;
-            let set_layouts = [set_layout];
+            let images = Textures::new(&gpu, pool)?;
+            let set_layouts = [set_layout, images.layout()];
             let layout = device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
                 None,
             )?;
-            let pipeline = Self::pipeline(device, render_pass, layout)?;
+            let fragment = spirv(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/terminal.frag.spv"
+            )));
+            let pipeline = Self::pipeline(device, render_pass, layout, &fragment, c"fs_main")?;
+            let fragment = spirv(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/terminal.image.spv"
+            )));
+            let image_pipeline =
+                Self::pipeline(device, render_pass, layout, &fragment, c"fs_image")?;
 
-            let sizes = [vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::SAMPLED_IMAGE,
-                descriptor_count: 2,
-            }];
+            let sizes = [
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: 2,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLER,
+                    descriptor_count: 1,
+                },
+            ];
             let descriptors = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(1)
@@ -166,7 +210,7 @@ impl VulkanRenderer {
             let set = device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(descriptors)
-                    .set_layouts(&set_layouts),
+                    .set_layouts(&set_layouts[..1]),
             )?[0];
             let atlas = Atlas::new(&gpu, pool, 1024)?;
             // Shape and rasterize through the device's cache: aegle's own UI
@@ -180,9 +224,12 @@ impl VulkanRenderer {
                 set_layout,
                 layout,
                 pipeline,
+                image_pipeline,
+                sampler,
                 descriptors,
                 set,
                 atlas,
+                images,
                 glyphs,
                 cell: CellSize::default(),
                 surfaces: Vec::new(),
@@ -198,21 +245,19 @@ impl VulkanRenderer {
         device: &aegle::app::ash::Device,
         pass: vk::RenderPass,
         layout: vk::PipelineLayout,
+        fragment: &[u32],
+        entry: &std::ffi::CStr,
     ) -> Result<vk::Pipeline> {
         let vertex = spirv(include_bytes!(concat!(
             env!("OUT_DIR"),
             "/terminal.vert.spv"
-        )));
-        let fragment = spirv(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/terminal.frag.spv"
         )));
         // SAFETY: valid SPIR-V from the build script; modules are destroyed after creation.
         unsafe {
             let vs = device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&vertex), None)?;
             let fs = device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(&fragment),
+                &vk::ShaderModuleCreateInfo::default().code(fragment),
                 None,
             )?;
             let stages = [
@@ -223,7 +268,7 @@ impl VulkanRenderer {
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(vk::ShaderStageFlags::FRAGMENT)
                     .module(fs)
-                    .name(c"fs_main"),
+                    .name(entry),
             ];
             let bindings = [vk::VertexInputBindingDescription {
                 binding: 0,
@@ -455,9 +500,12 @@ impl Renderer for VulkanRenderer {
         }
 
         let cell = self.cell;
+        self.images.begin();
         let mut source = Source {
             atlas: &mut self.atlas,
             glyphs: &mut self.glyphs,
+            images: &mut self.images,
+            gpu: &self.gpu,
         };
         quads::build(frame, cell, &mut source, &mut self.quads);
         if self.atlas.full {
@@ -465,13 +513,30 @@ impl Renderer for VulkanRenderer {
             let mut source = Source {
                 atlas: &mut self.atlas,
                 glyphs: &mut self.glyphs,
+                images: &mut self.images,
+                gpu: &self.gpu,
             };
             quads::build(frame, cell, &mut source, &mut self.quads);
         }
+
+        // This surface goes idle here and the others say so through their
+        // fences. Reaping comes before this render's uploads, or a stream that
+        // uploads every render would always find the transfer busy.
+        let surface = self.surfaces[index].as_ref().unwrap();
+        self.gpu.wait(surface.fence)?;
+        let surfaces = &self.surfaces;
+        let device = &self.gpu.device;
+        self.images.reap(&self.gpu, || {
+            surfaces.iter().enumerate().all(|(i, surface)| {
+                // SAFETY: each fence belongs to this device.
+                let idle = |s: &Surface| unsafe { device.get_fence_status(s.fence) };
+                i == index || surface.as_ref().is_none_or(|s| idle(s).unwrap_or(false))
+            })
+        });
         self.atlas.flush(&self.gpu)?;
+        self.images.flush(&self.gpu)?;
 
         let surface = self.surfaces[index].as_mut().unwrap();
-        self.gpu.wait(surface.fence)?;
         let count = self.quads.len();
         let bytes = (count.max(1) * size_of::<Quad>()) as u64;
         if surface
@@ -491,7 +556,9 @@ impl Renderer for VulkanRenderer {
         let instances = surface.instances.as_ref().unwrap();
         let (sx, sy) = (2.0 / size[0] as f32, 2.0 / size[1] as f32);
         let dst = instances.ptr.cast::<Quad>();
-        for (i, quad) in self.quads.iter().enumerate() {
+        // Internal iteration: every list runs as its own tight loop, where a
+        // `for` would re-check the whole chain per quad, holding the terminal.
+        self.quads.iter().enumerate().for_each(|(i, quad)| {
             let [x, y, w, h] = quad.rect;
             // SAFETY: the mapping holds at least `count` quads and is aligned for them.
             unsafe {
@@ -500,7 +567,7 @@ impl Renderer for VulkanRenderer {
                     ..*quad
                 });
             }
-        }
+        });
 
         let target = surface.target.as_ref().unwrap();
         let device = &self.gpu.device;
@@ -555,7 +622,56 @@ impl Renderer for VulkanRenderer {
                     &[],
                 );
                 device.cmd_bind_vertex_buffers(command, 0, &[instances.buffer], &[0]);
-                device.cmd_draw(command, 4, count as u32, 0, 0);
+                // Instances are in drawing order: each layer of images, then
+                // the quads above it. Images stay inside the cell area.
+                let [below, under, over] = self.quads.layers();
+                let cells = vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: frame.padding as i32,
+                        y: frame.padding as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: frame.term.cols() as u32 * cell.width,
+                        height: frame.term.rows() as u32 * cell.height,
+                    },
+                };
+                let mut first = 0;
+                for (images, quads) in [
+                    (below, self.quads.background.len()),
+                    (under, self.quads.foreground.len()),
+                    (over, 0),
+                ] {
+                    if !images.is_empty() {
+                        device.cmd_set_scissor(command, 0, &[cells]);
+                        device.cmd_bind_pipeline(
+                            command,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.image_pipeline,
+                        );
+                        for image in images {
+                            device.cmd_bind_descriptor_sets(
+                                command,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                self.layout,
+                                1,
+                                &[vk::DescriptorSet::from_raw(image.texture)],
+                                &[],
+                            );
+                            device.cmd_draw(command, 4, 1, 0, first);
+                            first += 1;
+                        }
+                        device.cmd_set_scissor(command, 0, &[area]);
+                        device.cmd_bind_pipeline(
+                            command,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            self.pipeline,
+                        );
+                    }
+                    if quads != 0 {
+                        device.cmd_draw(command, 4, quads as u32, 0, first);
+                        first += quads as u32;
+                    }
+                }
             }
             device.cmd_end_render_pass(command);
             device.end_command_buffer(command)?;
@@ -585,10 +701,13 @@ impl Drop for VulkanRenderer {
         // SAFETY: the device is idle and nothing else references these objects.
         unsafe {
             self.atlas.destroy(&self.gpu, self.pool);
+            self.images.destroy(&self.gpu, self.pool);
             device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline(self.image_pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_pool(self.descriptors, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_sampler(self.sampler, None);
             device.destroy_render_pass(self.render_pass, None);
             device.destroy_command_pool(self.pool, None);
         }

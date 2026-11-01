@@ -382,6 +382,8 @@ name = "axo-term"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "miniz_oxide 0.9.1",
+ "png",
  "unicode-width",
  "vte",
  "windows-sys",

@@ -25,7 +25,7 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 
 | crate | 职责 | 依赖 |
 | --- | --- | --- |
-| `axo-term` | PTY（Unix: openpty/fork；Windows: ConPTY）、VT 解析（vte）、网格/回滚、选择、键盘与鼠标编码 | `vte`、`unicode-width`、`libc`(unix)、`windows-sys`(windows) |
+| `axo-term` | PTY（Unix: openpty/fork；Windows: ConPTY）、VT 解析（vte）、kitty 与 sixel 图像协议、网格/回滚、选择、键盘与鼠标编码 | `vte`、`unicode-width`、`png`、`miniz_oxide`、`libc`(unix)、`windows-sys`(windows) |
 | `axo-render` | `Renderer` trait、字形与框线栅格化（aegle-text + aegle-glyph）、`vulkan` 实现（ash，WGSL→SPIR-V 构建期由 naga 编译） | aegle |
 | `axo` (bin) | 配置、标签页、分屏布局、块（终端/设置）、快捷键、标记 UI | 上两者 + aegle |
 
@@ -45,6 +45,18 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 1. 只有聚焦块发布 `ImeRequest`，`surrounding` 为 `None`（`axo-term` 不把网格当成可编辑文档，输入法也无从 `delete_surrounding_text` 改动 shell 提示符），`cursor_rect` 为光标单元格的逻辑像素矩形，`multiline = false`。
 2. 平台事务（`delete_*` + `commit` + `preedit`）到达 `CanvasEvent::Ime`：`preedit` 只画在本地（覆写光标处单元格、宽字符占两格、下划线、光标跟随插入点），`commit` 才 `session.write()` 进 PTY；`delete_*` 对终端无意义（字节已交给子进程），忽略。
 3. 光标移动/滚动/输出后 `sync_ime()` 比较单元格，只在变化时 `request_ime_sync()`，空闲不产生任何平台往返；焦点离开（`CanvasEvent::ImeCancelled`）直接丢弃预编辑。
+
+## 图像
+
+kitty 与 sixel 的差别只在“文字如何对待图像”，其余共用一层：
+
+1. `Pixels`（`Arc`，RGBA8）+ `Placement`（锚点、像素偏移、裁剪、单元格尺寸、`z`）。匿名图像与 sixel 只由放置持有，随放置一起释放；带 id 的 kitty 图像另存一份，按配额从旧到新淘汰。
+2. 放置锚定绝对行号：环形缓冲下标 + 累计淘汰行数（`Grid::base`）。整屏滚入历史不触碰放置，只有在环内移动行的滚动（区域、备用屏）才遍历；部分滚出区域的图像继续完整绘制直到完全离开，不逐步裁剪。
+3. kitty 图像是图层，文字不影响；sixel 是单元格内容，`Images::punch` 把被写入的格子从放置里切掉、拆成周围的裁剪块，渲染器无需支持。文本路径只多一次“有没有 sixel”的判断。
+4. 渲染：实例按绘制顺序写入同一缓冲（低于背景的图像、背景、文字下的图像、文字、文字上的图像）。图像是单独的管线和 set 1，走双线性采样，并把采样钳在裁剪框内，避免相邻纹素串色。
+5. GPU 纹理是缓存：以 `Weak<Pixels>` 感知释放，退役纹理等所有 surface 空闲后销毁（不阻塞渲染），只有超出 256 MiB 预算才按 LRU 淘汰视野外的。
+
+解码（PNG/zlib）在读线程持 `Term` 锁时完成，大图解码期间 UI 取锁会短暂等待；真成问题时再把解码移出锁。
 
 ## 里程碑
 
@@ -88,6 +100,14 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 - [x] 与 Alacritty 0.17 同条件对比（DSR 同步吞吐，2026-10 复测，输入法已接入）：ASCII 161.4 vs 140.7 MiB/s、SGR 185.6 vs 184.8、CJK 169.2 vs 167.1、备用屏 TUI 174.9 vs 171.5 MiB/s；启动 64.1 vs 114.1 ms；空闲 CPU 0 ticks/5s vs 7；PSS 58.8 vs 39.0 MiB、线程 7 vs 16
   - 复测时发现并修掉了一个真实回归：输入法在每次宿主状态变化后都会回一个空 `done`，把它当成 update 上报会让宿主再发一遍状态，两者以事件循环速率互相触发（实测洪水输出时 ~500 次/秒 text-input 事务），吞吐因此腰斩到 68.7 MiB/s；忽略"只确认状态"的空批次（仅当它结束合成时才上报）后回到 162.7 MiB/s，同时终端侧不再为空事务重绘
 
+### M5 图像协议
+- [x] kitty 图形协议：直传/文件/临时文件、分块、RGB/RGBA/PNG、zlib、放置、删除、查询、配额
+- [x] sixel：批量解码、DECSDM、`?8452`、DA1 与 `XTSMGRAPHICS` 上报、`CSI 14/16 t` 像素尺寸
+- [x] 复用：放置模型、滚动、裁剪由两种协议共用；`Transfer` 同时服务字形图集与图像上传
+- [x] 实机读回验证（Khronos Validation Layer 零报告）：原尺寸逐像素对齐、PNG、缩放与裁剪、`z` 三层、文字打穿 sixel、滚动与 padding 裁剪、清屏与删除；512×512 每帧换图 300 帧显存平稳
+- [x] 无图像时端到端吞吐（5 次中位，对比上一提交）：ASCII 533 → 539 MiB/s、SGR 265 → 258、CJK 205 → 206；解码：sixel 448 Mpx/s，kitty 1080p RGBA 8.6 ms/帧
+- [ ] kitty：共享内存传输（`t=s`）、动画（`a=f/a/c`）、虚拟放置（`U=1`，tmux 内用）、相对放置（`P/Q`）
+
 ## 平台支持
 
 - [x] Linux（Wayland）：`aegle-platform-wayland`，Vulkan/ash 渲染，`text-input-v3` 输入法。
@@ -98,7 +118,7 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 ## 后续（未做）
 - [ ] macOS 渲染器接入（wgpu/Metal 或 CPU 后备），随后才能实机验证 macOS 输入法
 - [ ] 回滚的重排（resize reflow）；当前 resize 截断/填充并保留光标行
-- [ ] 连字（ligatures）、Kitty 键盘协议、图像协议（sixel/kitty）
+- [ ] 连字（ligatures）、Kitty 键盘协议
 - [ ] 其他渲染器实现（wgpu / CPU）——`axo_render::Renderer` 接口已就绪
 - [ ] 搜索、URL 识别
 - [ ] 配色方案的实时预览（设置页显示当前方案色板）与 `theme` 下拉的搜索

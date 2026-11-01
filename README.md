@@ -20,6 +20,10 @@
   - `VulkanRenderer` 复用 `aegle` 的共享 Vulkan 设备与图形队列（`App::vulkan()`），通过构建期 `naga` 编译的 SPIR-V 着色器、按需填充的共享字形图集与单次实例化绘制（背景连续 run 合并 + 字形 + 光标/选区/装饰线）渲染到离屏 `R8G8B8A8_SRGB` 纹理，并以 `TextureId` 零拷贝合成进 aegle 帧。
   - 字形通过 `aegle-text`（系统字体与 CJK 回退）与 `aegle-glyph` 按需栅格化；制表符/框线字符（`U+2500..=U+259F`）按单元格像素精确生成，无缝拼接。
 - **输入法（IME）预编辑**：终端把自己的光标单元格作为合成锚点交给平台，输入法的预编辑文本就地显示在光标处（宽字符占两格、带下划线、光标随预编辑插入点移动），提交（commit）时才写入 PTY；终端不向输入法公开 surrounding text，因此输入法不会去改动 shell 的提示符。三个平台共用同一套逻辑，差异全部由 aegle 的平台层吸收：Wayland 走 `text-input-v3`（`zwp_text_input_v3`，一次 `done` 为一个原子事务），Windows 走 TSF（`ITextStoreACP` 文档），macOS 走 `NSTextInputClient`（`setMarkedText:`/`insertText:`）。会话在焦点离开、切分屏/标签、光标滚出视野时自动结束，光标移动后按需重发锚点（不变则不重发）。
+- **图像协议（kitty + sixel）**：两种协议共用一层图像存储与同一条绘制路径，没有图像时只多一次判空。
+  - kitty 图形协议：直传、文件与临时文件传输，分块传输，24/32 位像素、PNG、zlib 压缩，放置（裁剪、缩放、像素偏移、`z` 三层、光标策略）、全部删除选择子、查询应答与 320 MiB 配额。共享内存传输、动画与虚拟放置（Unicode 占位符）明确回 `ENOTSUP`/`EINVAL`，客户端可以回退。
+  - sixel：带重复、颜色寄存器（RGB/HLS，1024 个）与栅格属性的批量解码器，`?80`（DECSDM）、`?8452`，并通过 DA1 与 `XTSMGRAPHICS` 上报能力；`CSI 14/16 t` 报告像素尺寸。sixel 是单元格内容，文字与擦除会精确到格地打穿它，新图覆盖旧图时释放旧图；kitty 图像是独立图层，文字不影响它。
+  - 图像锚定在绝对行号上，随文字滚入历史、随历史淘汰，滚屏不需要逐图更新；主屏与备用屏各有一份存储。GPU 纹理只是按需填充的缓存，终端释放像素后下一次渲染即回收，每帧换图的客户端（如视频）不会累积显存。
 - **完整配色系统**：配色方案包含默认前景/背景、光标（含光标下的文字色）、选区（含选区文字色）与 16 个 ANSI 颜色，16–255 按标准色立方与灰阶生成；内置 kitty（默认）、Catppuccin Mocha、Dracula、Gruvbox、Nord、One Dark、Solarized、Tokyo Night 等方案，并可直接读取 kitty 主题文件（`$XDG_CONFIG_HOME/axo/themes/*.conf`），也可在配置中按 `color0..color15` 单独覆盖。窗口、标签栏、菜单与控件主题全部由该方案派生，程序查询颜色（OSC 10/11）返回同一组颜色。
 - **aegle 标记语言块**：
   - 窗口骨架（`crates/axo/ui/window.aegle`）与设置块（`crates/axo/ui/settings.aegle`）均采用 `.aegle` 标记语言编写。
@@ -32,8 +36,8 @@
 
 | Crate | 职责 |
 | --- | --- |
-| `crates/axo-term` | PTY（Unix：`openpty`/`fork`/`TIOCSWINSZ`；Windows：ConPTY + `CreateProcessW`）、VT 状态机（`vte`）、OSC 0/2/7/10/11、主/备屏与环形回滚、选区、键盘与鼠标协议编码 |
-| `crates/axo-render` | `Renderer` trait、配色方案与 256 色解析（`palette`）、后端无关图元布局（`quads`）、字形与框线栅格化（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`） |
+| `crates/axo-term` | PTY（Unix：`openpty`/`fork`/`TIOCSWINSZ`；Windows：ConPTY + `CreateProcessW`）、VT 状态机（`vte`）、OSC 0/2/7/10/11、kitty 与 sixel 图像协议、主/备屏与环形回滚、选区、键盘与鼠标协议编码 |
+| `crates/axo-render` | `Renderer` trait、配色方案与 256 色解析（`palette`）、后端无关图元布局（`quads`）、字形与框线栅格化（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`，含图像纹理缓存） |
 | `crates/axo` | 配置读写、分屏树（`layout`）、块右键菜单（`menu`）、块接口与实现（`blocks::terminal`、`blocks::settings`）、标签页工作区与快捷键 |
 
 ## 构建与运行
