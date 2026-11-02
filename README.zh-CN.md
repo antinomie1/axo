@@ -33,7 +33,7 @@
 ## 构建与运行
 
 - Linux：依赖 `libSDL3`（运行时动态加载）、系统字体（Fontconfig/FreeType）及 Vulkan 1.1+ 驱动。
-- Windows：依赖 Vulkan 1.1+ 驱动与 Windows 10 1809+（ConPTY）。
+- Windows：依赖 Vulkan 1.1+ 驱动（透明需 `VK_KHR_external_memory_win32`）与 Windows 10 1809+（ConPTY）。`axo.exe` 为 GUI 程序，不弹出控制台窗口；`opacity` 小于 1 时经 DirectComposition 呈现，因为 Win32 的 Vulkan 交换链只支持不透明合成。
 - macOS：支持编译检查（`cargo check --target aarch64-apple-darwin`），GPU 渲染器接入中。
 
 ```sh

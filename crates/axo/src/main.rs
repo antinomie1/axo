@@ -4,6 +4,9 @@
 //! macOS compiles the same blocks and composition path, but aegle has no GPU
 //! backend there yet, so the binary reports that instead of opening a window.
 #![cfg_attr(target_os = "macos", allow(dead_code))]
+// A GUI program: Windows opens no console window for it. Its shells get their
+// consoles from ConPTY.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod blocks;
 mod chrome;

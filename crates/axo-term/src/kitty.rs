@@ -730,8 +730,11 @@ mod tests {
         std::fs::remove_file(kept).unwrap();
         command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=4", &path(&dir));
         assert!(reply(&mut term).contains("EBADF"));
-        command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=5", b"/proc/self/environ");
-        assert!(reply(&mut term).contains("EPERM"));
+        #[cfg(unix)]
+        {
+            command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=5", b"/proc/self/environ");
+            assert!(reply(&mut term).contains("EPERM"));
+        }
         // A link does not change what the path really names.
         #[cfg(unix)]
         {

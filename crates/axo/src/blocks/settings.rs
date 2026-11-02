@@ -15,6 +15,12 @@ use crate::{
     shared::{Msg, SharedRef},
 };
 
+/// What a blank shell field starts, as the label above it says.
+#[cfg(windows)]
+const SHELL_HINT: &str = "Shell (default: powershell.exe; applies to new terminals)";
+#[cfg(unix)]
+const SHELL_HINT: &str = "Shell (empty: $SHELL; applies to new terminals)";
+
 pub struct Settings {
     id: u64,
     root: Node,
@@ -49,6 +55,7 @@ impl Settings {
         root.set_basis(0.0);
         root.set_min_width(0.0);
         root.set_min_height(0.0);
+        view.shell_label.set_text(SHELL_HINT);
         let settings = Rc::new(Self {
             id: next_id(),
             root,

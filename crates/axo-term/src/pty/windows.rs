@@ -12,6 +12,8 @@ use std::{
     },
     path::{Path, PathBuf},
     ptr,
+    sync::{Arc, Mutex},
+    thread,
 };
 
 use windows_sys::Win32::{
@@ -23,7 +25,8 @@ use windows_sys::Win32::{
             CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
             EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
             InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW, UpdateProcThreadAttribute,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+            UpdateProcThreadAttribute,
             WaitForSingleObject,
         },
     },
@@ -68,18 +71,20 @@ impl Child {
     }
 }
 
-/// The pseudo console handle. Closing it hangs up the client, as closing a
-/// terminal window does, so it closes exactly once and never twice.
+/// The pseudo console handle, shared with the thread that closes it when the
+/// child exits. Closing it hangs up the client, as closing a terminal window
+/// does, so it closes exactly once and never twice.
 pub struct Console {
-    console: Option<HPCON>,
+    console: Arc<Mutex<Option<HPCON>>>,
 }
 
 impl Console {
     pub fn resize(&self, size: WinSize) -> io::Result<()> {
-        let Some(console) = self.console else {
+        let console = self.console.lock().unwrap();
+        let Some(console) = *console else {
             return Err(io::Error::other("the pseudo console is closed"));
         };
-        // SAFETY: the handle is live and owned here.
+        // SAFETY: the handle is live while the lock keeps it from closing.
         let result = unsafe { ResizePseudoConsole(console, coord(size)) };
         match result < 0 {
             true => Err(hresult(result, "ResizePseudoConsole")),
@@ -99,11 +104,17 @@ impl Console {
     }
 
     fn close(&mut self) {
-        if let Some(console) = self.console.take() {
-            // SAFETY: the handle is live and owned here; it is taken, so this
-            // runs once.
-            unsafe { ClosePseudoConsole(console) };
-        }
+        close(&self.console);
+    }
+}
+
+/// Closes the pseudo console once. Outside the lock: closing waits until the
+/// reader has drained the last output.
+fn close(console: &Mutex<Option<HPCON>>) {
+    let taken = console.lock().unwrap().take();
+    if let Some(console) = taken {
+        // SAFETY: the handle was live and is taken, so this runs once.
+        unsafe { ClosePseudoConsole(console) };
     }
 }
 
@@ -242,13 +253,15 @@ fn conpty(size: WinSize) -> io::Result<(HPCON, Attributes, File, File)> {
         list,
         _storage: storage,
     };
-    // SAFETY: the value is an `HPCON` and the list has room for one attribute.
+    // SAFETY: the list has room for one attribute. This attribute's value is
+    // the `HPCON` itself, not a pointer to it: given the handle's address, the
+    // child attaches to no console and fails to start with `0xC0000142`.
     let updated = unsafe {
         UpdateProcThreadAttribute(
             list,
             0,
             PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
-            (&console as *const HPCON).cast(),
+            console as *const c_void,
             size_of::<HPCON>(),
             ptr::null_mut(),
             ptr::null(),
@@ -280,6 +293,9 @@ impl Pty {
         let startup = STARTUPINFOEXW {
             StartupInfo: windows_sys::Win32::System::Threading::STARTUPINFOW {
                 cb: size_of::<STARTUPINFOEXW>() as u32,
+                // Null standard handles: the child uses the pseudo console's,
+                // never ours, which a launcher may have redirected.
+                dwFlags: STARTF_USESTDHANDLES,
                 ..Default::default()
             },
             lpAttributeList: attributes.list,
@@ -316,19 +332,31 @@ impl Pty {
         unsafe {
             CloseHandle(process.hThread);
         }
+        let console = Console {
+            console: Arc::new(Mutex::new(Some(console))),
+        };
+        // SAFETY: as above; `Child` closes the process handle once.
+        let handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess as RawHandle) };
+        // ConPTY keeps its output open after the client exits. Closing the
+        // pseudo console then flushes the last output and ends the pipe, so
+        // the reader sees the end of the output and reports the exit.
+        let (exited, shared) = (handle.try_clone()?, console.console.clone());
+        thread::Builder::new()
+            .name("axo-pty-wait".into())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                // SAFETY: the duplicated process handle is owned by this thread.
+                unsafe { WaitForSingleObject(exited.as_raw_handle() as HANDLE, INFINITE) };
+                close(&shared);
+            })?;
         Ok(Self {
             reader,
             writer,
             child: Child {
-                // SAFETY: as above; `Child` closes the process handle once.
-                process: Some(unsafe {
-                    OwnedHandle::from_raw_handle(process.hProcess as RawHandle)
-                }),
+                process: Some(handle),
                 id: process.dwProcessId,
             },
-            console: Console {
-                console: Some(console),
-            },
+            console,
         })
     }
 }

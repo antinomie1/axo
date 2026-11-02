@@ -102,7 +102,7 @@ kitty 与 sixel 共用同一存储与绘制管线：
 ## 平台支持
 
 - [x] Linux：`aegle-platform-sdl3`（SDL3，支持 Wayland 与 X11），Vulkan/ash 渲染，文本输入。
-- [x] Windows：`aegle-platform-win32`（Win32 窗口 + TSF 输入法），ConPTY，Vulkan/ash 渲染。
+- [x] Windows：`aegle-platform-win32`（Win32 窗口 + TSF 输入法），ConPTY，Vulkan/ash 渲染；透明窗口经 DirectComposition 呈现，GUI 子系统无控制台窗口。
 - [x] macOS：`aegle-platform-macos`（AppKit + `NSTextInputClient`），`openpty` PTY 编译支持。
 - [ ] macOS 渲染器：Metal / wgpu 渲染器接入中。
 

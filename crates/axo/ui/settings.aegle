@@ -54,7 +54,7 @@ ScrollView {
     Separator {}
     Text { text: "Scrollback lines"; wrap: true }
     NumberField { id: scrollback; min: 0; max: 1000000; value: 10000; step: 1000; decimals: 0 }
-    Text { text: "Shell (empty: $SHELL; applies to new terminals)"; wrap: true }
+    Text { id: shell_label; text: "Shell (applies to new terminals)"; wrap: true }
     TextField { id: shell; text: "" }
 
     Row {

@@ -15,11 +15,11 @@ pub const MIN_FONT_SIZE: f32 = 4.0;
 pub const MAX_FONT_SIZE: f32 = 96.0;
 
 /// The shell used when the settings name none: the login shell on Unix, the
-/// command processor on Windows.
+/// powershell on Windows.
 fn default_shell() -> String {
     #[cfg(windows)]
     {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+        "powershell.exe".into()
     }
     #[cfg(unix)]
     {
@@ -47,7 +47,7 @@ pub struct Config {
     /// Whether the tab bar is shown; when off, the workspace holds a single
     /// tab and new tabs are disabled.
     pub tab_bar: bool,
-    /// Empty: the platform's default shell (`$SHELL`, or `%COMSPEC%`).
+    /// Empty: the platform's default shell (`$SHELL`, or `powershell.exe`).
     pub shell: String,
 }
 
