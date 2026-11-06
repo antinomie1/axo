@@ -1,5 +1,6 @@
 //! A real shell on ConPTY: it starts, its output
 //! reaches the grid, and its exit is reported.
+#![cfg(windows)]
 
 use std::{sync::mpsc, time::Duration};
 
@@ -48,7 +49,6 @@ fn run(shell: &str) -> String {
     screen(&session.term())
 }
 
-#[cfg(windows)]
 #[test]
 fn cmd_and_powershell_start_on_conpty() {
     let cmd = run("cmd.exe /c echo axo-cmd-%TERM%");
