@@ -19,15 +19,14 @@ use std::{
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
     System::{
-        Console::{ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole, COORD},
+        Console::{COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole},
         Pipes::CreatePipe,
         Threading::{
             CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
             EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
-            InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-            UpdateProcThreadAttribute,
-            WaitForSingleObject,
+            InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+            PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+            STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
         },
     },
 };
@@ -272,12 +271,7 @@ fn conpty(size: WinSize) -> io::Result<(HPCON, Attributes, File, File)> {
         unsafe { ClosePseudoConsole(console) };
         return Err(io::Error::last_os_error());
     }
-    Ok((
-        console,
-        attributes,
-        File::from(input),
-        File::from(output),
-    ))
+    Ok((console, attributes, File::from(input), File::from(output)))
 }
 
 impl Pty {

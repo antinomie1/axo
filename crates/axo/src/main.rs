@@ -42,9 +42,11 @@ use crate::{
 /// has a GPU backend for, and the missing one says so instead of guessing.
 #[cfg(target_os = "macos")]
 fn main() -> Result<()> {
-    Err("axo: no GPU renderer on macOS yet; the window, its text input and the \
+    Err(
+        "axo: no GPU renderer on macOS yet; the window, its text input and the \
          composition path compile, but nothing can draw the terminal"
-        .into())
+            .into(),
+    )
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

@@ -221,12 +221,13 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
         .filter(|preedit| !preedit.text.is_empty())
         .map(|preedit| Overlay::new(&preedit, term.cursor.x, cols));
     let cursor = match (&overlay, cursor) {
-        (Some(overlay), _) => {
-            (term.modes.show_cursor && cursor_row < rows && !overlay.columns.is_empty()).then_some((
-                (overlay.start + overlay.caret).min(cols.saturating_sub(1)),
-                cursor_row,
-            ))
-        }
+        (Some(overlay), _) => (term.modes.show_cursor
+            && cursor_row < rows
+            && !overlay.columns.is_empty())
+        .then_some((
+            (overlay.start + overlay.caret).min(cols.saturating_sub(1)),
+            cursor_row,
+        )),
         (None, cursor) => cursor,
     };
     let block = frame.focused && shape == CursorShape::Block;
@@ -281,8 +282,8 @@ pub fn build(frame: &Frame<'_>, cell: CellSize, glyphs: &mut dyn GlyphSource, ou
             if flags.has(Flags::DIM) && !selected {
                 fg = palette.dim(fg);
             }
-            let under_cursor = block
-                && cursor.is_some_and(|(cx, cy)| cy == y && x >= cx && x - cx < cursor_span);
+            let under_cursor =
+                block && cursor.is_some_and(|(cx, cy)| cy == y && x >= cx && x - cx < cursor_span);
             if under_cursor {
                 bg = Some(palette.cursor);
                 if let Some(text) = palette.cursor_text {

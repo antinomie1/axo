@@ -849,13 +849,7 @@ impl Term {
     }
 
     /// Runs a CSI sequence (`ESC [ ... final`).
-    pub(crate) fn csi(
-        &mut self,
-        params: &Params,
-        inter: &[u8],
-        ignore: bool,
-        action: u8,
-    ) {
+    pub(crate) fn csi(&mut self, params: &Params, inter: &[u8], ignore: bool, action: u8) {
         if ignore {
             return;
         }

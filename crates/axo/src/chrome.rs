@@ -8,9 +8,9 @@ use std::sync::LazyLock;
 use aegle::{
     prelude::{Appearance, Color, Theme, VisualState},
     ui::{
+        Decorator,
         control::PaintCx,
         scene::{Affine, FillRule, Path, PathBuilder, Point},
-        Decorator,
     },
 };
 
@@ -142,10 +142,26 @@ static GEAR_PATH: LazyLock<Path> = LazyLock::new(|| {
     // Center circular hole via 4 cubic Beziers.
     let k = r_hole * 0.552_284_8;
     b.move_to(Point::new(0.0, -r_hole));
-    b.cubic_to(Point::new(k, -r_hole), Point::new(r_hole, -k), Point::new(r_hole, 0.0));
-    b.cubic_to(Point::new(r_hole, k), Point::new(k, r_hole), Point::new(0.0, r_hole));
-    b.cubic_to(Point::new(-k, r_hole), Point::new(-r_hole, k), Point::new(-r_hole, 0.0));
-    b.cubic_to(Point::new(-r_hole, -k), Point::new(-k, -r_hole), Point::new(0.0, -r_hole));
+    b.cubic_to(
+        Point::new(k, -r_hole),
+        Point::new(r_hole, -k),
+        Point::new(r_hole, 0.0),
+    );
+    b.cubic_to(
+        Point::new(r_hole, k),
+        Point::new(k, r_hole),
+        Point::new(0.0, r_hole),
+    );
+    b.cubic_to(
+        Point::new(-k, r_hole),
+        Point::new(-r_hole, k),
+        Point::new(-r_hole, 0.0),
+    );
+    b.cubic_to(
+        Point::new(-r_hole, -k),
+        Point::new(-k, -r_hole),
+        Point::new(0.0, -r_hole),
+    );
     b.close();
 
     b.finish(FillRule::EvenOdd)

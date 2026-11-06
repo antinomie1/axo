@@ -199,8 +199,9 @@ impl Glyphs {
         for (x, y, w, h, content, src) in placed {
             for row in 0..h as usize {
                 for col in 0..w as usize {
-                    let dst = (((y - y0) as usize + row) * width as usize + (x - x0) as usize + col)
-                        * stride;
+                    let dst =
+                        (((y - y0) as usize + row) * width as usize + (x - x0) as usize + col)
+                            * stride;
                     let index = row * w as usize + col;
                     let pixel = match content {
                         Content::Mask => [255, 255, 255, src[index]],

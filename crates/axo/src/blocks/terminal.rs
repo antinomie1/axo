@@ -528,13 +528,10 @@ impl Inner {
         // Output arriving from here on wakes the UI again.
         self.session.take_dirty();
         let state = self.state.borrow();
-        let preedit = state
-            .preedit
-            .as_ref()
-            .map(|preedit| PreeditView {
-                text: &preedit.text,
-                cursor: preedit.cursor,
-            });
+        let preedit = state.preedit.as_ref().map(|preedit| PreeditView {
+            text: &preedit.text,
+            cursor: preedit.cursor,
+        });
         let term = self.session.term();
         let frame = Frame {
             term: &term,

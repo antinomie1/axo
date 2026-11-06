@@ -41,7 +41,9 @@ fn rasterizes_text_symbols_and_fallback() {
 
 #[test]
 fn a_shared_cache_is_not_duplicated_by_a_second_owner() {
-    let cache = Rc::new(RefCell::new(GlyphCache::with_limits(CacheLimits::default())));
+    let cache = Rc::new(RefCell::new(
+        GlyphCache::with_limits(CacheLimits::default()),
+    ));
     let font = FontSpec {
         family: "monospace".into(),
         size: 15.0,
