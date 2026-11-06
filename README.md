@@ -20,7 +20,7 @@ Backends are conditionally compiled based on the target platform: PTY differenti
 - **Image Protocols (Kitty + Sixel)**: Unified graphics storage and rendering pipeline. Kitty protocol supports direct/chunked transfer, PNG, zlib, and multi-layer z-index; Sixel supports RGB/HLS palettes. Images anchor to line numbers, evict with scrollback history, and GPU textures cache on demand with idle cleanup.
 - **Native In-Place IME**: Cursor-anchored pre-edit layout with wide-character alignment and cursor tracking, integrated across SDL3, Windows TSF, and macOS NSTextInputClient.
 - **Typography & Pixel-Perfect Box Drawing**: On-demand system font rasterization and CJK fallback shaping; pixel-perfect rendering for box drawing and block elements (`U+2500..=U+259F`).
-- **Themes & Protocol Support**: Supports 24-bit TrueColor, alternate screen buffer, mouse reporting, and bracketed paste; includes built-in schemes (Kitty, Catppuccin, Tokyo Night, etc.) and native Kitty theme file compatibility.
+- **Themes & Protocol Support**: Supports 24-bit TrueColor, alternate screen buffer, mouse reporting, and bracketed paste; text or files dropped onto a terminal are pasted, files as shell-quoted paths; includes built-in schemes (Kitty, Catppuccin, Tokyo Night, etc.) and native Kitty theme file compatibility.
 
 ## Directory Structure
 

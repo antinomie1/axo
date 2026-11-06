@@ -20,7 +20,7 @@
 - **图像协议（Kitty + Sixel）**：统一的图像存储与绘制管线；Kitty 支持直传/分块/PNG/zlib/多层 z-index；Sixel 支持 RGB/HLS 调色板；图像锚定行号并随滚动历史淘汰，显存按需缓存且空闲自动回收。
 - **原生输入法（IME）**：光标处原位预编辑排版（宽字符对齐与光标同步），跨平台接入 SDL3、Windows TSF 与 macOS NSTextInputClient。
 - **字形整形与精确框线**：按需栅格化系统字体与 CJK 回退；制表符与框线字符（`U+2500..=U+259F`）像素级精确绘制。
-- **主题与协议兼容**：支持 24-bit TrueColor、主/备屏切换、鼠标报告与括号粘贴；内置 Kitty、Catppuccin、Tokyo Night 等配色方案，兼容读取 Kitty 主题文件。
+- **主题与协议兼容**：支持 24-bit TrueColor、主/备屏切换、鼠标报告与括号粘贴；文本或文件拖入终端即粘贴，文件粘贴为加引号的路径；内置 Kitty、Catppuccin、Tokyo Night 等配色方案，兼容读取 Kitty 主题文件。
 
 ## 目录结构
 

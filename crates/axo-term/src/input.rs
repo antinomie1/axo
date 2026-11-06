@@ -187,3 +187,33 @@ pub fn encode_mouse(
         ]);
     }
 }
+
+/// Dropped files as a shell would want them typed: each path quoted when it
+/// needs it, and each followed by a space so the next word can follow.
+pub fn quote_paths(paths: &[std::path::PathBuf]) -> String {
+    let mut out = String::new();
+    for path in paths {
+        quote_path(&path.to_string_lossy(), &mut out);
+        out.push(' ');
+    }
+    out
+}
+
+fn quote_path(path: &str, out: &mut String) {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%".contains(c);
+    #[cfg(windows)]
+    let plain = |c: char| plain(c) || c == '\\';
+    if !path.is_empty() && path.chars().all(plain) {
+        out.push_str(path);
+    } else if cfg!(windows) {
+        // No Windows path holds a double quote; cmd and PowerShell both take it.
+        out.push('"');
+        out.push_str(path);
+        out.push('"');
+    } else {
+        // Nothing expands inside single quotes; a quote closes, escapes, reopens.
+        out.push('\'');
+        out.push_str(&path.replace('\'', r"'\''"));
+        out.push('\'');
+    }
+}

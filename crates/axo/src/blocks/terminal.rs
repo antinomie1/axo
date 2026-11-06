@@ -21,7 +21,7 @@ use aegle::{
 use axo_render::{Frame, Preedit as PreeditView, SurfaceId};
 use axo_term::{
     Key, Mods, MouseAction, MouseButton, MouseMode, Options, Point as Cell, Selection,
-    SelectionKind, Session, WinSize, encode_key, encode_mouse,
+    SelectionKind, Session, WinSize, encode_key, encode_mouse, quote_paths,
 };
 
 use super::{Block, next_id};
@@ -228,6 +228,18 @@ impl Terminal {
             if !suppressed {
                 shown.show_at(at);
             }
+        });
+        // A dropped file types its path, as if pasted; dropped text is pasted.
+        let dropped = Rc::downgrade(&inner);
+        canvas.on_drop(move |node, event| {
+            let (Some(inner), DropEvent::Drop { data, .. }) = (dropped.upgrade(), event) else {
+                return;
+            };
+            match data {
+                DragData::Text(text) => inner.paste(&text),
+                DragData::Files(paths) => inner.paste(&quote_paths(&paths)),
+            }
+            node.focus();
         });
         let _ = inner.menu.set(menu);
         let _ = inner.canvas.set(canvas);
