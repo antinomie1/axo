@@ -34,7 +34,7 @@ Backends are conditionally compiled based on the target platform: PTY differenti
 
 - Linux: Requires `libSDL3` (dynamically loaded at runtime), system fonts (Fontconfig / FreeType), and a Vulkan 1.1+ driver.
 - Windows: Requires a Vulkan 1.1+ driver with `VK_KHR_external_memory_win32` for transparency, and Windows 10 1809+ (ConPTY). `axo.exe` is a GUI program and opens no console window; with `opacity` below 1 the window presents through DirectComposition, since Win32 Vulkan swapchains composite only opaquely.
-- macOS: Requires Metal. Windows are opaque, so `opacity` has no effect.
+- macOS: Requires Metal. Windows are always transparent-capable (a non-opaque window with a translucent Metal layer), so `opacity` applies at once.
 
 ```sh
 cargo run --release -p axo

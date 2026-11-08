@@ -29,10 +29,10 @@ use crate::{
 
 fn main() -> Result<()> {
     let config = Config::load();
-    // Wayland always hands out an alpha surface; elsewhere premultiplied alpha
-    // is only worth it when the window is translucent. aegle's wgpu windows
-    // are opaque, so macOS ignores `opacity`.
-    let transparent = cfg!(target_os = "linux") || (cfg!(windows) && config.opacity < 1.0);
+    // Wayland always hands out an alpha surface, and a non-opaque macOS window
+    // costs only the compositor's blend; on Windows premultiplied alpha takes
+    // DirectComposition, so it is only worth it when the window is translucent.
+    let transparent = !cfg!(windows) || config.opacity < 1.0;
     let app = App::with_options(AppOptions {
         app_id: "dev.axo.Terminal".into(),
         theme: config.theme(transparent),
@@ -41,6 +41,11 @@ fn main() -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         vulkan: aegle::app::VulkanOptions {
             memory_budget: 96 * 1024 * 1024,
+            transparent,
+            ..Default::default()
+        },
+        #[cfg(target_os = "macos")]
+        wgpu: aegle::app::WgpuOptions {
             transparent,
             ..Default::default()
         },

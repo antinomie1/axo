@@ -106,7 +106,7 @@ kitty 与 sixel 共用同一存储与绘制管线：
 - [x] Windows：`aegle-platform-win32`（Win32 窗口 + TSF 输入法），ConPTY，Vulkan/ash 渲染；透明窗口经 DirectComposition 呈现，GUI 子系统无控制台窗口。
 - [x] macOS：`aegle-platform-macos`（AppKit + `NSTextInputClient`），`openpty` PTY 编译支持。
 - [x] macOS 渲染器：`WgpuRenderer`（wgpu/Metal，与 Vulkan 共用 WGSL、图元布局与图集打包）。lavapipe 上经 wgpu Vulkan 后端验证：200×50 满屏（9752 个图元）`render()` CPU 耗时 367 µs/帧，其中布局 114 µs。
-- [ ] macOS 实机验证（Metal）与透明窗口（aegle wgpu 窗口暂为不透明）。
+- [x] macOS 实机验证（macOS 15 x86_64，Metal）：窗口显示、Retina 2× 缩放、Menlo 等宽网格、CJK 回退、空闲 CPU 0%；透明窗口随 `opacity` 即时生效。
 
 ## 后续规划
 

@@ -34,7 +34,7 @@
 
 - Linux：依赖 `libSDL3`（运行时动态加载）、系统字体（Fontconfig/FreeType）及 Vulkan 1.1+ 驱动。
 - Windows：依赖 Vulkan 1.1+ 驱动（透明需 `VK_KHR_external_memory_win32`）与 Windows 10 1809+（ConPTY）。`axo.exe` 为 GUI 程序，不弹出控制台窗口；`opacity` 小于 1 时经 DirectComposition 呈现，因为 Win32 的 Vulkan 交换链只支持不透明合成。
-- macOS：需要 Metal。窗口不透明，`opacity` 不生效。
+- macOS：需要 Metal。窗口始终可透明（非不透明窗口 + 半透明 Metal 图层），`opacity` 即时生效。
 
 ```sh
 cargo run --release -p axo
