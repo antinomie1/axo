@@ -730,16 +730,21 @@ mod tests {
         std::fs::remove_file(kept).unwrap();
         command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=4", &path(&dir));
         assert!(reply(&mut term).contains("EBADF"));
+        // `/proc` exists only on Linux; every Unix has devices.
+        #[cfg(target_os = "linux")]
+        let secret = "/proc/self/environ";
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let secret = "/dev/zero";
         #[cfg(unix)]
         {
-            command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=5", b"/proc/self/environ");
+            command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=5", secret.as_bytes());
             assert!(reply(&mut term).contains("EPERM"));
         }
         // A link does not change what the path really names.
         #[cfg(unix)]
         {
             let link = dir.join(format!("axo-image-link-{}", std::process::id()));
-            std::os::unix::fs::symlink("/proc/self/environ", &link).unwrap();
+            std::os::unix::fs::symlink(secret, &link).unwrap();
             command(&mut term, "a=T,t=f,f=32,s=2,v=2,i=6", &path(&link));
             assert!(reply(&mut term).contains("EPERM"));
             std::fs::remove_file(link).unwrap();
