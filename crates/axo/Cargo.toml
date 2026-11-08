@@ -1,6 +1,6 @@
 [package]
 name = "axo"
-description = "Axo Terminal: a Vulkan-accelerated terminal built on aegle"
+description = "Axo Terminal: a GPU-accelerated terminal built on aegle"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,4 +25,4 @@ aegle = { workspace = true, features = ["vulkan", "sdl3"] }
 aegle = { workspace = true, features = ["vulkan"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-aegle = { workspace = true, features = ["tiny-skia"] }
+aegle = { workspace = true, features = ["wgpu"] }

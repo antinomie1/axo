@@ -2,20 +2,20 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-基于 [aegle](https://github.com/antinomie1/aegle) 的轻量化、模块化 Vulkan（`ash`）加速终端模拟器，支持 Linux、Windows 与 macOS。
+基于 [aegle](https://github.com/antinomie1/aegle) 的轻量化、模块化 GPU 加速（Vulkan 经 `ash`，Metal 经 `wgpu`）终端模拟器，支持 Linux、Windows 与 macOS。
 
 | 平台 | 窗口/输入 | PTY | 终端渲染 |
 | --- | --- | --- | --- |
 | Linux | SDL3（`aegle-platform-sdl3`，支持 Wayland 与 X11） | `openpty` + `fork` | Vulkan（`ash`） |
 | Windows 10 1809+ | Win32（`aegle-platform-win32`，TSF 输入法） | ConPTY | Vulkan（`ash`） |
-| macOS | AppKit（`aegle-platform-macos`，`NSTextInputClient`） | `openpty` + `fork` | 暂缺（无 GPU 渲染） |
+| macOS | AppKit（`aegle-platform-macos`，`NSTextInputClient`） | `openpty` + `fork` | wgpu（Metal） |
 
-按目标平台选择后端编译：PTY 在 `axo-term` 内区分 Unix 与 Windows，Vulkan 仅在 Linux 与 Windows 编译。macOS 接入窗口与输入法，GPU 渲染器尚未接入（启动提示后退出）。
+按目标平台选择后端编译：PTY 在 `axo-term` 内区分 Unix 与 Windows，Vulkan 仅在 Linux 与 Windows 编译，wgpu 仅在 macOS 编译，均在 aegle 呈现所用的设备上绘制。
 
 ## 特性
 
 - **极致性能与零空闲开销**：手写零分配 VT 状态机解析（含 ASCII 批量快路径），原子脏位合并唤醒；帧回调驱动渲染，空闲 CPU 占用严格为 0%，Release 二进制约 2.4 MiB。
-- **Vulkan GPU 加速渲染**：基于 `ash` 的单次实例化绘制管线，着色器构建期预编译，离屏 sRGB 纹理零拷贝合成。
+- **GPU 加速渲染**：同一份 WGSL 着色器与单次实例化绘制管线，Vulkan 经 `ash`（SPIR-V 构建期预编译），Metal 经 `wgpu`；离屏 sRGB 纹理零拷贝合成。
 - **多标签与任意分屏**：支持标签页及任意嵌套的水平/垂直终端分屏树。
 - **图像协议（Kitty + Sixel）**：统一的图像存储与绘制管线；Kitty 支持直传/分块/PNG/zlib/多层 z-index；Sixel 支持 RGB/HLS 调色板；图像锚定行号并随滚动历史淘汰，显存按需缓存且空闲自动回收。
 - **原生输入法（IME）**：光标处原位预编辑排版（宽字符对齐与光标同步），跨平台接入 SDL3、Windows TSF 与 macOS NSTextInputClient。
@@ -27,14 +27,14 @@
 | Crate | 职责 |
 | --- | --- |
 | `crates/axo-term` | PTY（Unix：`openpty`/`fork`；Windows：ConPTY）、手写 VT 状态机、OSC 0/2/7/10/11、Kitty 与 Sixel 图像协议、主/备屏与环形回滚、选区、键盘与鼠标协议编码 |
-| `crates/axo-render` | `Renderer` trait、配色方案（`palette`）、图元布局（`quads`）、字形与框线（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`，图像纹理缓存） |
+| `crates/axo-render` | `Renderer` trait、配色方案（`palette`）、图元布局（`quads`）、字形与框线（`glyphs`/`boxdraw`）、`VulkanRenderer`（`ash`，图像纹理缓存）、`WgpuRenderer`（macOS） |
 | `crates/axo` | 配置读写、分屏树（`layout`）、右键菜单（`menu`）、终端/设置块（`blocks`）、标签页工作区与快捷键 |
 
 ## 构建与运行
 
 - Linux：依赖 `libSDL3`（运行时动态加载）、系统字体（Fontconfig/FreeType）及 Vulkan 1.1+ 驱动。
 - Windows：依赖 Vulkan 1.1+ 驱动（透明需 `VK_KHR_external_memory_win32`）与 Windows 10 1809+（ConPTY）。`axo.exe` 为 GUI 程序，不弹出控制台窗口；`opacity` 小于 1 时经 DirectComposition 呈现，因为 Win32 的 Vulkan 交换链只支持不透明合成。
-- macOS：支持编译检查（`cargo check --target aarch64-apple-darwin`），GPU 渲染器接入中。
+- macOS：需要 Metal。窗口不透明，`opacity` 不生效。
 
 ```sh
 cargo run --release -p axo

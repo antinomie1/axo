@@ -1,9 +1,5 @@
 //! Axo Terminal: tabs of split blocks on aegle; terminals draw through the
-//! platform's GPU backend, which is Vulkan on Linux and Windows.
-//!
-//! macOS compiles the same blocks and composition path, but aegle has no GPU
-//! backend there yet, so the binary reports that instead of opening a window.
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+//! platform's GPU backend: Vulkan on Linux and Windows, wgpu (Metal) on macOS.
 // A GUI program: Windows opens no console window for it. Its shells get their
 // consoles from ConPTY.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -17,60 +13,48 @@ mod menu;
 mod shared;
 mod workspace;
 
-use aegle::prelude::*;
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::{
     cell::{Cell, OnceCell, RefCell},
     rc::Rc,
 };
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use aegle::app::VulkanOptions;
+use aegle::prelude::*;
+use axo_render::Renderer;
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-use axo_render::{Renderer, vulkan::VulkanRenderer};
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::{
     config::Config,
     shared::{Msg, Shared},
     workspace::Workspace,
 };
 
-/// The terminal needs a renderer: the same code runs on every platform aegle
-/// has a GPU backend for, and the missing one says so instead of guessing.
-#[cfg(target_os = "macos")]
-fn main() -> Result<()> {
-    Err(
-        "axo: no GPU renderer on macOS yet; the window, its text input and the \
-         composition path compile, but nothing can draw the terminal"
-            .into(),
-    )
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn main() -> Result<()> {
     let config = Config::load();
     // Wayland always hands out an alpha surface; elsewhere premultiplied alpha
-    // is only worth it when the window is translucent.
-    let transparent = cfg!(target_os = "linux") || config.opacity < 1.0;
+    // is only worth it when the window is translucent. aegle's wgpu windows
+    // are opaque, so macOS ignores `opacity`.
+    let transparent = cfg!(target_os = "linux") || (cfg!(windows) && config.opacity < 1.0);
     let app = App::with_options(AppOptions {
         app_id: "dev.axo.Terminal".into(),
         theme: config.theme(transparent),
         dark_theme: None,
         high_contrast_theme: None,
-        vulkan: VulkanOptions {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        vulkan: aegle::app::VulkanOptions {
             memory_budget: 96 * 1024 * 1024,
             transparent,
-            ..VulkanOptions::default()
+            ..Default::default()
         },
         ..AppOptions::default()
     })?;
     let view = aegle::ui!(&app, "ui/window.aegle")?;
 
-    let device = app.vulkan().ok_or("the window has no Vulkan device")?;
-    let mut renderer = VulkanRenderer::new(device)?;
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let mut renderer = axo_render::vulkan::VulkanRenderer::new(
+        app.vulkan().ok_or("the window has no Vulkan device")?,
+    )?;
+    #[cfg(target_os = "macos")]
+    let mut renderer =
+        axo_render::wgpu::WgpuRenderer::new(app.wgpu().ok_or("the window has no wgpu device")?);
     let scale = view.root.scale().unwrap_or(1.0);
     renderer.set_font(&config.font(), scale)?;
     let shared = Rc::new(Shared {

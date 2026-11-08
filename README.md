@@ -2,20 +2,20 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A lightweight, modular, Vulkan (`ash`)-accelerated terminal emulator built on [aegle](https://github.com/antinomie1/aegle), supporting Linux, Windows, and macOS.
+A lightweight, modular, GPU-accelerated (Vulkan via `ash`, Metal via `wgpu`) terminal emulator built on [aegle](https://github.com/antinomie1/aegle), supporting Linux, Windows, and macOS.
 
 | Platform | Windowing / Input | PTY | Terminal Renderer |
 | --- | --- | --- | --- |
 | Linux | SDL3 (`aegle-platform-sdl3`, Wayland & X11) | `openpty` + `fork` | Vulkan (`ash`) |
 | Windows 10 1809+ | Win32 (`aegle-platform-win32`, TSF IME) | ConPTY | Vulkan (`ash`) |
-| macOS | AppKit (`aegle-platform-macos`, `NSTextInputClient`) | `openpty` + `fork` | Missing (no GPU rendering yet) |
+| macOS | AppKit (`aegle-platform-macos`, `NSTextInputClient`) | `openpty` + `fork` | wgpu (Metal) |
 
-Backends are conditionally compiled based on the target platform: PTY differentiates between Unix and Windows inside `axo-term`, and Vulkan is compiled only on Linux and Windows. macOS integrates windowing and IME, while the GPU renderer is not yet connected (displays a prompt and exits on launch).
+Backends are conditionally compiled based on the target platform: PTY differentiates between Unix and Windows inside `axo-term`, Vulkan is compiled only on Linux and Windows, and wgpu only on macOS, each drawing on the device aegle presents with.
 
 ## Features
 
 - **High Performance & Zero Idle Overhead**: Hand-written zero-allocation VT state machine parser with an ASCII batch fast path and atomic dirty flag merging; paced by compositor frame callbacks with strictly 0% idle CPU and a ~2.4 MiB release binary.
-- **Vulkan GPU Rendering**: Single instanced draw pipeline via `ash`, build-time precompiled shaders, and zero-copy off-screen sRGB compositing.
+- **GPU Rendering**: One WGSL shader and a single instanced draw pipeline, through `ash` on Vulkan (SPIR-V precompiled at build time) and `wgpu` on Metal; zero-copy off-screen sRGB compositing.
 - **Tabs & Arbitrary Splits**: Support for multiple tabs and arbitrary nested horizontal/vertical terminal split trees.
 - **Image Protocols (Kitty + Sixel)**: Unified graphics storage and rendering pipeline. Kitty protocol supports direct/chunked transfer, PNG, zlib, and multi-layer z-index; Sixel supports RGB/HLS palettes. Images anchor to line numbers, evict with scrollback history, and GPU textures cache on demand with idle cleanup.
 - **Native In-Place IME**: Cursor-anchored pre-edit layout with wide-character alignment and cursor tracking, integrated across SDL3, Windows TSF, and macOS NSTextInputClient.
@@ -27,14 +27,14 @@ Backends are conditionally compiled based on the target platform: PTY differenti
 | Crate | Responsibility |
 | --- | --- |
 | `crates/axo-term` | PTY (Unix: `openpty`/`fork`; Windows: ConPTY), hand-written VT state machine, OSC 0/2/7/10/11, Kitty & Sixel image protocols, primary/alternate screen and circular scrollback, selections, keyboard & mouse protocol encoding |
-| `crates/axo-render` | `Renderer` trait, color schemes (`palette`), quad layouts (`quads`), glyphs & box drawing (`glyphs`/`boxdraw`), `VulkanRenderer` (`ash`, image texture cache) |
+| `crates/axo-render` | `Renderer` trait, color schemes (`palette`), quad layouts (`quads`), glyphs & box drawing (`glyphs`/`boxdraw`), `VulkanRenderer` (`ash`, image texture cache), `WgpuRenderer` (macOS) |
 | `crates/axo` | Configuration read/write, split tree (`layout`), context menus (`menu`), terminal/settings blocks (`blocks`), tab workspaces, and keybindings |
 
 ## Building & Running
 
 - Linux: Requires `libSDL3` (dynamically loaded at runtime), system fonts (Fontconfig / FreeType), and a Vulkan 1.1+ driver.
 - Windows: Requires a Vulkan 1.1+ driver with `VK_KHR_external_memory_win32` for transparency, and Windows 10 1809+ (ConPTY). `axo.exe` is a GUI program and opens no console window; with `opacity` below 1 the window presents through DirectComposition, since Win32 Vulkan swapchains composite only opaquely.
-- macOS: Compilation check supported (`cargo check --target aarch64-apple-darwin`), GPU renderer integration in progress.
+- macOS: Requires Metal. Windows are opaque, so `opacity` has no effect.
 
 ```sh
 cargo run --release -p axo

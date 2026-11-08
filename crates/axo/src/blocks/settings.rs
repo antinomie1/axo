@@ -214,6 +214,10 @@ impl Settings {
         let percent = (config.opacity * 100.0).round();
         let text = match self.shared.transparent || config.opacity >= 1.0 {
             true => format!("Window opacity: {percent}%"),
+            // aegle's wgpu windows have no alpha.
+            false if cfg!(target_os = "macos") => {
+                format!("Window opacity: {percent}% (not supported on macOS)")
+            }
             false => {
                 format!("Window opacity: {percent}% (save and restart to enable transparency)")
             }

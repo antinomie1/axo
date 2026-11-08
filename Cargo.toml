@@ -13,8 +13,7 @@ axo-term = { path = "crates/axo-term" }
 axo-render = { path = "crates/axo-render" }
 # Exactly one aegle renderer per build. Crates add the target's renderer
 # feature themselves: Vulkan (which also hosts the terminal's ash pipeline) on
-# Linux and Windows, the software compositor on macOS, whose GPU backend is not
-# wired up yet.
+# Linux and Windows, wgpu (Metal, hosting the terminal's wgpu pipeline) on macOS.
 aegle = { git = "https://github.com/antinomie1/aegle", rev = "ccb8627c4bf4529a39433b825cdc75b9ecada76c", default-features = false, features = ["desktop"] }
 aegle-glyph = { git = "https://github.com/antinomie1/aegle", rev = "ccb8627c4bf4529a39433b825cdc75b9ecada76c", features = ["scene"] }
 aegle-text = { git = "https://github.com/antinomie1/aegle", rev = "ccb8627c4bf4529a39433b825cdc75b9ecada76c", features = ["scene"] }

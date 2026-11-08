@@ -1,6 +1,6 @@
 # Axo Terminal — 设计与 TODO
 
-Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 加速终端。目标：极致性能、轻量、模块化，不过度工程。
+Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 GPU 加速终端（Vulkan/ash；macOS 为 wgpu/Metal）。目标：极致性能、轻量、模块化，不过度工程。
 
 ## 架构
 
@@ -18,7 +18,8 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 
 - aegle 用 `vulkan` 渲染器构建；`App::vulkan()` 给出共享设备（`raw_device()`）。
 - 终端块：自有 ash 管线把网格画进离屏 `R8G8B8A8_SRGB` 图像，`register_texture` 后在 Canvas painter 中 `builder.texture(id, rect)` 合成进 aegle 帧。同一队列、先于 aegle 帧按脏画布提交，空闲终端零绘制。
-- 渲染器接口 `axo_render::Renderer`（trait）：块只依赖 trait；Vulkan 是其一个实现，可扩展其他渲染器。
+- 渲染器接口 `axo_render::Renderer`（trait）：块只依赖 trait；Linux/Windows 为 Vulkan 实现，macOS 为 wgpu 实现。
+- macOS：aegle 用 `wgpu` 渲染器构建；`App::wgpu()` 给出共享设备与队列。终端纹理（`Rgba8UnormSrgb`）`register_texture` 后同样经 `builder.texture` 合成。wgpu 自行跟踪资源依赖与生命周期，故无栅栏、无等待、无纹理退役；上传在下一次提交开头执行，所有表面共用一个实例缓冲。
 - PTY 读线程解析 VT 序列并更新 `Term`（`Mutex`），通过原子脏标志合并 `UiProxy` 唤醒（空闲零 CPU、零轮询）。
 
 ## Crate 划分
@@ -26,7 +27,7 @@ Axo（`axo`）是基于 [aegle](https://github.com/antinomie1/aegle) 的 Vulkan 
 | crate | 职责 | 依赖 |
 | --- | --- | --- |
 | `axo-term` | PTY（Unix: openpty/fork；Windows: ConPTY）、手写 VT 状态机、kitty 与 sixel 图像协议、网格/回滚、选择、键盘与鼠标编码 | `unicode-width`、`png`、`miniz_oxide`、`libc`(unix)、`windows-sys`(windows) |
-| `axo-render` | `Renderer` trait、字形与框线栅格化（aegle-text + aegle-glyph）、`vulkan` 实现（ash，WGSL→SPIR-V 构建期由 naga 编译） | aegle |
+| `axo-render` | `Renderer` trait、字形与框线栅格化（aegle-text + aegle-glyph）、`vulkan` 实现（ash，WGSL→SPIR-V 构建期由 naga 编译）、`wgpu` 实现（macOS，同一 WGSL 运行时编译） | aegle |
 | `axo` (bin) | 配置、标签页、分屏布局、块（终端/设置）、快捷键、标记 UI | 上两者 + aegle |
 
 ## 对 aegle 的最小补充
@@ -104,11 +105,11 @@ kitty 与 sixel 共用同一存储与绘制管线：
 - [x] Linux：`aegle-platform-sdl3`（SDL3，支持 Wayland 与 X11），Vulkan/ash 渲染，文本输入。
 - [x] Windows：`aegle-platform-win32`（Win32 窗口 + TSF 输入法），ConPTY，Vulkan/ash 渲染；透明窗口经 DirectComposition 呈现，GUI 子系统无控制台窗口。
 - [x] macOS：`aegle-platform-macos`（AppKit + `NSTextInputClient`），`openpty` PTY 编译支持。
-- [ ] macOS 渲染器：Metal / wgpu 渲染器接入中。
+- [x] macOS 渲染器：`WgpuRenderer`（wgpu/Metal，与 Vulkan 共用 WGSL、图元布局与图集打包）。lavapipe 上经 wgpu Vulkan 后端验证：200×50 满屏（9752 个图元）`render()` CPU 耗时 367 µs/帧，其中布局 114 µs。
+- [ ] macOS 实机验证（Metal）与透明窗口（aegle wgpu 窗口暂为不透明）。
 
 ## 后续规划
 
-- [ ] macOS GPU 渲染器接入（wgpu / Metal）
 - [ ] 终端重排（resize reflow）
 - [ ] 连字（ligatures）、Kitty 键盘协议
 - [ ] 搜索与 URL 识别

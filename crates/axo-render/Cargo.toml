@@ -1,14 +1,15 @@
 [package]
 name = "axo-render"
-description = "Axo terminal renderers behind one Renderer trait; Vulkan via ash"
+description = "Axo terminal renderers behind one Renderer trait: Vulkan via ash, Metal via wgpu"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["vulkan"]
+default = ["vulkan", "wgpu"]
 vulkan = []
+wgpu = []
 
 [dependencies]
 axo-term.workspace = true
@@ -27,4 +28,4 @@ naga = { version = "30.0.1", default-features = false, features = ["wgsl-in", "s
 aegle = { workspace = true, features = ["vulkan"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-aegle = { workspace = true, features = ["tiny-skia"] }
+aegle = { workspace = true, features = ["wgpu"] }

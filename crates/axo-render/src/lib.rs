@@ -2,19 +2,23 @@
 //!
 //! A terminal block owns a surface of a renderer and asks it to draw the
 //! terminal into it, then paints the surface into its aegle scene. Callers only
-//! see the trait, so another backend (wgpu, CPU) plugs in without API changes.
-//! Shared, backend-neutral pieces live here: glyph rasterization through the
-//! aegle text stack ([`glyphs`]), the cell-to-quad layout ([`quads`]) and the
-//! terminal color system ([`palette`]).
+//! see the trait: Vulkan (ash) draws on Linux and Windows, wgpu (Metal) on
+//! macOS, each on the device aegle presents with. Shared, backend-neutral
+//! pieces live here: glyph rasterization through the aegle text stack
+//! ([`glyphs`]), the cell-to-quad layout ([`quads`]), atlas shelf packing and
+//! the terminal color system ([`palette`]).
 
 mod boxdraw;
 pub mod glyphs;
 pub mod palette;
 pub mod quads;
-// Vulkan is the GPU path on Linux and Windows; macOS has no ash backend in
-// aegle yet, so only these targets compile the renderer.
+mod shelf;
+// Each target compiles only the backend of the renderer aegle presents with:
+// Vulkan on Linux and Windows, wgpu (Metal) on macOS.
 #[cfg(all(feature = "vulkan", any(target_os = "linux", target_os = "windows")))]
 pub mod vulkan;
+#[cfg(all(feature = "wgpu", target_os = "macos"))]
+pub mod wgpu;
 
 use aegle::ui::scene::{Rect, SceneBuilder};
 pub use axo_term::CursorShape;
